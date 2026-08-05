@@ -1,0 +1,84 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build static binary
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o acc ./cmd/acc
+      - name: Stage file tree
+        run: |
+          mkdir -p stage/usr/bin stage/usr/share/applications stage/usr/share/pixmaps
+          install -m755 acc stage/usr/bin/acc
+          install -m755 gui/acc-gui.py stage/usr/bin/acc-gui
+          install -m644 assets/icon-256.png stage/usr/share/pixmaps/asustor-acc.png
+          install -m644 packaging/asustor-acc.desktop stage/usr/share/applications/
+      - name: Build .deb
+        run: |
+          mkdir -p deb/DEBIAN && cp -r stage/usr deb/
+          cat > deb/DEBIAN/control <<EOF
+          Package: asustor-acc-linux
+          Version: ${VERSION}
+          Architecture: amd64
+          Maintainer: Asustor ACC for Linux contributors
+          Depends: python3-gi, gir1.2-gtk-4.0, xdg-utils
+          Section: net
+          Priority: optional
+          Description: Native ASUSTOR NAS discovery and management for Linux
+           Unofficial Control Center replacement: mDNS discovery, ADM web UI
+           launcher, Wake-on-LAN. CLI (acc) plus GTK4 GUI (acc-gui).
+          EOF
+          dpkg-deb --build --root-owner-group deb "asustor-acc-linux_${VERSION}_amd64.deb"
+      - name: Build .rpm
+        run: |
+          sudo apt-get update && sudo apt-get install -y rpm
+          mkdir -p rpmtop/{SPECS,BUILD,RPMS,SOURCES,SRPMS}
+          cat > rpmtop/SPECS/pkg.spec <<EOF
+          Name: asustor-acc-linux
+          Version: ${VERSION}
+          Release: 1
+          Summary: Native ASUSTOR NAS discovery and management for Linux
+          License: MIT
+          Requires: python3-gobject, gtk4, xdg-utils
+          %description
+          Unofficial Control Center replacement: mDNS discovery, ADM web UI
+          launcher, Wake-on-LAN. CLI (acc) plus GTK4 GUI (acc-gui).
+          %install
+          cp -r ${PWD}/stage/* %{buildroot}/
+          %files
+          /usr/bin/acc
+          /usr/bin/acc-gui
+          /usr/share/applications/asustor-acc.desktop
+          /usr/share/pixmaps/asustor-acc.png
+          EOF
+          rpmbuild --define "_topdir ${PWD}/rpmtop" \
+            --define "__brp_mangle_shebangs %{nil}" \
+            --define "debug_package %{nil}" --define "__strip /bin/true" \
+            -bb rpmtop/SPECS/pkg.spec
+          cp rpmtop/RPMS/x86_64/*.rpm .
+      - name: Build tarball
+        run: |
+          T="asustor-acc-linux-${VERSION}"
+          mkdir -p "$T" && cp -r stage/usr "$T/" && install -m755 packaging/install.sh "$T/"
+          tar czf "${T}-linux-amd64.tar.gz" "$T"
+      - name: Checksums
+        run: sha256sum acc *.deb *.rpm *.tar.gz > SHA256SUMS
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            acc
+            *.deb
+            *.rpm
+            *.tar.gz
+            SHA256SUMS
