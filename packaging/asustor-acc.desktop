@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Asustor ACC for Linux
+Comment=Discover and manage ASUSTOR NAS devices on the local network
+Exec=acc-gui
+Icon=asustor-acc
+Terminal=false
+Categories=Network;Utility;
+Keywords=ASUSTOR;NAS;ADM;Control Center;discovery;wake on lan;

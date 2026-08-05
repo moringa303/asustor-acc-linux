@@ -1,0 +1,5 @@
+/acc
+*.deb
+*.rpm
+*.tar.gz
+stage/

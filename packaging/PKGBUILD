@@ -1,0 +1,29 @@
+# Maintainer: your name <you@example.com>
+# AUR package for Asustor ACC for Linux. Update url/source after publishing
+# the GitHub repository, then run updpkgsums.
+pkgname=asustor-acc-linux
+pkgver=1.1.2
+pkgrel=1
+pkgdesc="Native ASUSTOR NAS discovery and management (unofficial Control Center replacement)"
+arch=(x86_64)
+url="https://github.com/moringa303/asustor-acc-linux"
+license=(MIT)
+depends=(gtk4 python-gobject xdg-utils)
+makedepends=(go)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CGO_ENABLED=0
+  go build -trimpath -ldflags="-s -w" -o acc ./cmd/acc
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 acc "$pkgdir/usr/bin/acc"
+  install -Dm755 gui/acc-gui.py "$pkgdir/usr/bin/acc-gui"
+  install -Dm644 assets/icon-256.png "$pkgdir/usr/share/pixmaps/asustor-acc.png"
+  install -Dm644 packaging/asustor-acc.desktop "$pkgdir/usr/share/applications/asustor-acc.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
