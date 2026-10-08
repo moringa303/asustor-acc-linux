@@ -2,7 +2,7 @@
 # AUR package for Asustor ACC for Linux. Update url/source after publishing
 # the GitHub repository, then run updpkgsums.
 pkgname=asustor-acc-linux
-pkgver=1.2.0
+pkgver=1.2.1
 pkgrel=1
 pkgdesc="Unofficial Linux version of ASUSTOR Control Center (NAS discovery, ADM launcher, WOL)"
 arch=(x86_64)

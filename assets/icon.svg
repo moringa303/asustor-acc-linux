@@ -1,51 +1,44 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <!-- Asustor ACC for Linux app icon (MIT, original work, not derived from
-       ASUSTOR artwork): an appliance box with a power switch on the front
-       and a glowing side. -->
+       ASUSTOR artwork): neon line art of a rackmount server, three units
+       with drive slots and status LEDs. -->
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#141a22"/>
-      <stop offset="1" stop-color="#0a0e13"/>
+    <linearGradient id="neon" gradientUnits="userSpaceOnUse"
+                    x1="96" y1="128" x2="416" y2="400">
+      <stop offset="0" stop-color="#22d9ff"/>
+      <stop offset="1" stop-color="#3bffa0"/>
     </linearGradient>
-    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2c3540"/>
-      <stop offset="1" stop-color="#1b222b"/>
-    </linearGradient>
-    <linearGradient id="side" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#5ae7ff"/>
-      <stop offset="0.55" stop-color="#27b4e0"/>
-      <stop offset="1" stop-color="#0f86b3"/>
-    </linearGradient>
-    <linearGradient id="knob" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3f4a57"/>
-      <stop offset="1" stop-color="#232a33"/>
-    </linearGradient>
-    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="14"/>
+    <radialGradient id="bg" cx="0.5" cy="0.38" r="0.95">
+      <stop offset="0" stop-color="#0d151f"/>
+      <stop offset="1" stop-color="#04060a"/>
+    </radialGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
     </filter>
   </defs>
 
-  <rect width="512" height="512" rx="116" fill="url(#tile)"/>
+  <rect x="8" y="8" width="496" height="496" rx="112" fill="url(#bg)"/>
 
-  <!-- ground shadow -->
-  <ellipse cx="259" cy="392" rx="185" ry="16" fill="#000000" opacity="0.35"/>
-
-  <!-- glow behind the lit side -->
-  <path d="M 354 140 L 438 92 L 438 320 L 354 368 Z" fill="#35cdf2"
-        opacity="0.6" filter="url(#glow)"/>
-
-  <!-- box: top, side, front -->
-  <path d="M 96 140 L 180 92 L 438 92 L 354 140 Z" fill="#3a4551"/>
-  <path d="M 354 140 L 438 92 L 438 320 L 354 368 Z" fill="url(#side)"/>
-  <path d="M 354 200 L 438 148 L 438 212 L 354 264 Z" fill="#ffffff" opacity="0.17"/>
-  <path d="M 354 296 L 438 244 L 438 272 L 354 324 Z" fill="#ffffff" opacity="0.09"/>
-  <rect x="84" y="140" width="270" height="228" rx="22" fill="url(#front)"/>
-
-  <!-- power switch: recessed pill, knob left, lit I on the right -->
-  <rect x="129" y="232" width="180" height="72" rx="36" fill="#10151b"/>
-  <rect x="135" y="238" width="84" height="60" rx="30" fill="url(#knob)"/>
-  <line x1="273" y1="251" x2="273" y2="285" stroke="#4ae0ff"
-        stroke-width="12" stroke-linecap="round" filter="url(#glow)"/>
-  <line x1="273" y1="251" x2="273" y2="285" stroke="#4ae0ff"
-        stroke-width="12" stroke-linecap="round"/>
+  <g filter="url(#soft)">
+    <!-- three rack units -->
+    <g fill="none" stroke="url(#neon)" stroke-width="16" stroke-linecap="round">
+      <rect x="96" y="128" width="320" height="72" rx="16"/>
+      <rect x="96" y="222" width="320" height="72" rx="16"/>
+      <rect x="96" y="316" width="320" height="72" rx="16"/>
+    </g>
+    <!-- drive slots -->
+    <g fill="none" stroke="url(#neon)" stroke-width="12" stroke-linecap="round">
+      <line x1="132" y1="166" x2="268" y2="166"/>
+      <line x1="132" y1="258" x2="268" y2="258"/>
+      <line x1="132" y1="352" x2="268" y2="352"/>
+    </g>
+    <!-- status LEDs: top unit active -->
+    <circle cx="372" cy="166" r="12" fill="#3bffa0"/>
+    <circle cx="372" cy="258" r="12" fill="#17475c"/>
+    <circle cx="372" cy="352" r="12" fill="#17475c"/>
+  </g>
 </svg>
