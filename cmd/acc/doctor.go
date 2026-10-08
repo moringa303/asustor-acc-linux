@@ -20,7 +20,7 @@ import (
 // separates "no mDNS traffic at all" (firewall / VLAN isolation) from
 // "mDNS works but no ASUSTOR NAS is announcing".
 func doctor(timeout time.Duration) {
-	fmt.Println("acc doctor — mDNS discovery health check")
+	fmt.Println("acc doctor: mDNS discovery health check")
 	fmt.Println()
 
 	ifaces, _ := net.Interfaces()
@@ -44,7 +44,7 @@ func doctor(timeout time.Duration) {
 		fmt.Printf("  %-14s %s (%s)\n", ifc.Name, note, addrSummary(ifc))
 	}
 	if len(candidates) == 0 {
-		fmt.Println("\nRESULT: no usable multicast interface — connect to the LAN first.")
+		fmt.Println("\nRESULT: no usable multicast interface. Connect to the LAN first.")
 		return
 	}
 
@@ -120,10 +120,10 @@ func doctor(timeout time.Duration) {
 	fmt.Println()
 	switch {
 	case asustorSeen:
-		fmt.Println("RESULT: an ASUSTOR NAS IS answering on this network — 'acc scan' should")
-		fmt.Println("work. If it does not, avahi-daemon may be swallowing unicast replies;")
-		fmt.Println("install avahi ('sudo pacman -S avahi' / enable avahi-daemon) — acc")
-		fmt.Println("automatically uses it when present. Or rerun scan with --verbose.")
+		fmt.Println("RESULT: an ASUSTOR NAS IS answering on this network, so 'acc scan'")
+		fmt.Println("should work. If it does not, avahi-daemon may be swallowing unicast")
+		fmt.Println("replies; install avahi ('sudo pacman -S avahi' / enable avahi-daemon)")
+		fmt.Println("and acc uses it automatically. Or rerun scan with --verbose.")
 	case packets > 0:
 		fmt.Println("RESULT: mDNS reception works (other devices answered), but no ASUSTOR")
 		fmt.Println("NAS responded. Check that:")
@@ -133,7 +133,7 @@ func doctor(timeout time.Duration) {
 		fmt.Println("  - in ADM check Settings > General that the web ports are standard, and")
 		fmt.Println("    that no ADM Defender firewall rule blocks the LAN")
 	default:
-		fmt.Println("RESULT: NO mDNS traffic received at all — replies are being blocked")
+		fmt.Println("RESULT: NO mDNS traffic received at all; replies are being blocked")
 		fmt.Println("before they reach this program. On EndeavourOS the usual cause is")
 		fmt.Println("firewalld. Allow mDNS with:")
 		fmt.Println("  sudo firewall-cmd --add-service=mdns --permanent")
@@ -150,7 +150,7 @@ func doctor(timeout time.Duration) {
 		fmt.Printf("firewalld is running. Active zones: %s", firstLine(zones))
 		fmt.Printf("Allowed services in default zone: %s\n", strings.TrimSpace(string(services)))
 		if !strings.Contains(string(services), "mdns") {
-			fmt.Println("NOTE: 'mdns' is NOT in the allowed services — that blocks discovery.")
+			fmt.Println("NOTE: 'mdns' is NOT in the allowed services, which blocks discovery.")
 		}
 	}
 }

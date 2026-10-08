@@ -1,47 +1,51 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- Asustor ACC for Linux — original icon (MIT), sleek edition.
-       Single-weight line art: NAS unit + discovery signal, gradient
-       stroke, lowercase wordmark. Not derived from ASUSTOR artwork. -->
+  <!-- Asustor ACC for Linux app icon (MIT, original work, not derived from
+       ASUSTOR artwork): an appliance box with a power switch on the front
+       and a glowing side. -->
   <defs>
-    <linearGradient id="stroke" gradientUnits="userSpaceOnUse"
-                    x1="116" y1="140" x2="400" y2="330">
-      <stop offset="0" stop-color="#22d9ff"/>
-      <stop offset="1" stop-color="#3bffa0"/>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141a22"/>
+      <stop offset="1" stop-color="#0a0e13"/>
     </linearGradient>
-    <radialGradient id="bg" cx="0.5" cy="0.38" r="0.9">
-      <stop offset="0" stop-color="#0d151f"/>
-      <stop offset="1" stop-color="#04060a"/>
-    </radialGradient>
-    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="4" result="b"/>
-      <feMerge>
-        <feMergeNode in="b"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c3540"/>
+      <stop offset="1" stop-color="#1b222b"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5ae7ff"/>
+      <stop offset="0.55" stop-color="#27b4e0"/>
+      <stop offset="1" stop-color="#0f86b3"/>
+    </linearGradient>
+    <linearGradient id="knob" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3f4a57"/>
+      <stop offset="1" stop-color="#232a33"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14"/>
     </filter>
   </defs>
 
-  <rect x="8" y="8" width="496" height="496" rx="112" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="116" fill="url(#tile)"/>
 
-  <!-- NAS unit: single-weight rounded outline with two drive slots -->
-  <g fill="none" stroke="url(#stroke)" stroke-width="18" stroke-linecap="round"
-     filter="url(#soft)">
-    <rect x="118" y="146" width="162" height="176" rx="26"/>
-    <line x1="152" y1="202" x2="246" y2="202"/>
-    <line x1="152" y1="252" x2="246" y2="252"/>
-  </g>
+  <!-- ground shadow -->
+  <ellipse cx="259" cy="392" rx="185" ry="16" fill="#000000" opacity="0.35"/>
 
-  <!-- discovery signal: dot + two arcs, clear of the unit -->
-  <g filter="url(#soft)">
-    <circle cx="318" cy="188" r="11" fill="#3bffa0"/>
-    <g fill="none" stroke="#3bffa0" stroke-width="16" stroke-linecap="round">
-      <path d="M 344 148 a 66 66 0 0 1 20 47"/>
-      <path d="M 376 116 a 112 112 0 0 1 34 80" opacity="0.5"/>
-    </g>
-  </g>
+  <!-- glow behind the lit side -->
+  <path d="M 354 140 L 438 92 L 438 320 L 354 368 Z" fill="#35cdf2"
+        opacity="0.6" filter="url(#glow)"/>
 
-  <!-- wordmark: lowercase, light, wide tracking -->
-  <text x="268" y="424" text-anchor="middle"
-        font-family="DejaVu Sans, Verdana, sans-serif" font-weight="300"
-        font-size="96" letter-spacing="22" fill="#eef4f8">acc</text>
+  <!-- box: top, side, front -->
+  <path d="M 96 140 L 180 92 L 438 92 L 354 140 Z" fill="#3a4551"/>
+  <path d="M 354 140 L 438 92 L 438 320 L 354 368 Z" fill="url(#side)"/>
+  <path d="M 354 200 L 438 148 L 438 212 L 354 264 Z" fill="#ffffff" opacity="0.17"/>
+  <path d="M 354 296 L 438 244 L 438 272 L 354 324 Z" fill="#ffffff" opacity="0.09"/>
+  <rect x="84" y="140" width="270" height="228" rx="22" fill="url(#front)"/>
+
+  <!-- power switch: recessed pill, knob left, lit I on the right -->
+  <rect x="129" y="232" width="180" height="72" rx="36" fill="#10151b"/>
+  <rect x="135" y="238" width="84" height="60" rx="30" fill="url(#knob)"/>
+  <line x1="273" y1="251" x2="273" y2="285" stroke="#4ae0ff"
+        stroke-width="12" stroke-linecap="round" filter="url(#glow)"/>
+  <line x1="273" y1="251" x2="273" y2="285" stroke="#4ae0ff"
+        stroke-width="12" stroke-linecap="round"/>
 </svg>

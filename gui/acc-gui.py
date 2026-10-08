@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Native GTK4 front-end for the `acc` ASUSTOR NAS scanner.
+"""GTK4 GUI of Asustor ACC for Linux.
 
-Discovery, WOL and URL handling are done by the bundled `acc` Go binary;
-this window just presents the results Control Center-style.
+Discovery, WOL and URL handling are done by the bundled `acc` binary;
+this window presents the results like the Control Center device list.
 """
 import json
 import os
@@ -27,6 +27,10 @@ def _find_acc():
 
 ACC_BIN = _find_acc()
 
+# Must match the installed .desktop file name and the hicolor icon name,
+# or GNOME shows a generic gear icon for the window.
+APP_ID = "io.github.moringa303.AsustorAcc"
+
 COLUMNS = [
     ("Name", "name"),
     ("IP", "ip"),
@@ -37,11 +41,18 @@ COLUMNS = [
     ("Port", "port"),
     ("State", "state"),
 ]
+STATE_COL = len(COLUMNS) - 1
+
+# Wire values an older acc binary may still pass through, mapped to the
+# display names.
+STATE_NAMES = {"inited": "Ready", "uninited": "Uninitialized"}
+STATE_COLORS = {"Ready": "#2ec27e", "Uninitialized": "#3584e4", "Not ready": "#e5a50a"}
 
 
 class AccWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Asustor ACC for Linux")
+        self.set_icon_name(APP_ID)
         self.set_default_size(980, 480)
         self.devices = []
 
@@ -50,14 +61,20 @@ class AccWindow(Gtk.ApplicationWindow):
 
         self.scan_btn = Gtk.Button(label="Scan")
         self.scan_btn.add_css_class("suggested-action")
+        self.scan_btn.set_tooltip_text("Search the local network for ASUSTOR NAS devices")
         self.scan_btn.connect("clicked", lambda *_: self.scan())
         header.pack_start(self.scan_btn)
 
+        self.spinner = Gtk.Spinner()
+        header.pack_start(self.spinner)
+
         self.open_btn = Gtk.Button(label="Open ADM")
+        self.open_btn.set_tooltip_text("Open the web interface of the selected NAS")
         self.open_btn.connect("clicked", lambda *_: self.open_selected())
         header.pack_end(self.open_btn)
 
         self.wol_btn = Gtk.Button(label="Wake (WOL)")
+        self.wol_btn.set_tooltip_text("Send a Wake-on-LAN packet to the selected NAS")
         self.wol_btn.connect("clicked", lambda *_: self.wol_selected())
         header.pack_end(self.wol_btn)
 
@@ -65,10 +82,26 @@ class AccWindow(Gtk.ApplicationWindow):
         self.view = Gtk.TreeView(model=self.store)
         for i, (title, _) in enumerate(COLUMNS):
             renderer = Gtk.CellRendererText()
+            renderer.set_padding(10, 5)
             col = Gtk.TreeViewColumn(title, renderer, text=i)
             col.set_resizable(True)
+            if i == 0:
+                col.set_expand(True)
+            if i == STATE_COL:
+                col.set_cell_data_func(renderer, self._state_cell)
             self.view.append_column(col)
+
+        # Uninitialized NAS rows get a link icon that opens the ADM setup
+        # wizard (plain HTTP, port 8000).
+        setup_renderer = Gtk.CellRendererPixbuf()
+        self.setup_col = Gtk.TreeViewColumn("Setup", setup_renderer)
+        self.setup_col.set_cell_data_func(setup_renderer, self._setup_cell)
+        self.view.append_column(self.setup_col)
+
         self.view.connect("row-activated", lambda *_: self.open_selected())
+        click = Gtk.GestureClick()
+        click.connect("released", self._view_clicked)
+        self.view.add_controller(click)
 
         scroll = Gtk.ScrolledWindow(vexpand=True)
         scroll.set_child(self.view)
@@ -83,10 +116,41 @@ class AccWindow(Gtk.ApplicationWindow):
 
         self.scan()
 
+    @staticmethod
+    def _state_cell(_col, renderer, model, it, _data):
+        color = STATE_COLORS.get(model.get_value(it, STATE_COL))
+        if color:
+            renderer.set_property("foreground", color)
+        renderer.set_property("foreground-set", color is not None)
+
+    @staticmethod
+    def _setup_cell(_col, renderer, model, it, _data):
+        uninitialized = model.get_value(it, STATE_COL) == "Uninitialized"
+        renderer.set_property("icon-name", "web-browser-symbolic" if uninitialized else None)
+
+    def _view_clicked(self, _gesture, _n_press, x, y):
+        bx, by = self.view.convert_widget_to_bin_window_coords(int(x), int(y))
+        hit = self.view.get_path_at_pos(bx, by)
+        if not hit or hit[1] is not self.setup_col:
+            return
+        dev = self.devices[hit[0].get_indices()[0]]
+        if not dev.get("initialized"):
+            Gio.AppInfo.launch_default_for_uri(self._device_url(dev))
+
+    @staticmethod
+    def _device_url(dev):
+        if not dev.get("initialized"):
+            return f"http://{dev['ip']}:{dev.get('port') or 8000}/"
+        https_only = str(dev.get("http_enabled", "")).lower() == "no"
+        port = dev.get("https_port") if https_only else dev.get("port")
+        scheme = "https" if https_only else "http"
+        return f"{scheme}://{dev['ip']}:{port}/"
+
     # -- actions ---------------------------------------------------------
     def scan(self):
         self.scan_btn.set_sensitive(False)
-        self.status.set_text("Scanning…")
+        self.spinner.start()
+        self.status.set_text("Scanning the local network…")
 
         def worker():
             try:
@@ -106,13 +170,20 @@ class AccWindow(Gtk.ApplicationWindow):
         self.devices = devices
         self.store.clear()
         for dev in devices:
-            self.store.append([str(dev.get(key, "") or "") for _, key in COLUMNS])
+            row = [str(dev.get(key, "") or "") for _, key in COLUMNS]
+            row[STATE_COL] = STATE_NAMES.get(row[STATE_COL], row[STATE_COL])
+            self.store.append(row)
         if err:
             self.status.set_text(f"Scan failed: {err}")
         elif devices:
-            self.status.set_text(f"Found {len(devices)} device(s).")
+            text = f"Found {len(devices)} device(s). Double-click a row to open ADM."
+            if any(not d.get("initialized") for d in devices):
+                text += " Click the browser icon on an uninitialized NAS to set it up."
+            self.status.set_text(text)
         else:
-            self.status.set_text("No ASUSTOR NAS devices found on the local network.")
+            self.status.set_text("No ASUSTOR NAS found on the local network. "
+                                 "Run 'acc doctor' in a terminal if you expected one.")
+        self.spinner.stop()
         self.scan_btn.set_sensitive(True)
         return False
 
@@ -126,11 +197,7 @@ class AccWindow(Gtk.ApplicationWindow):
     def open_selected(self):
         dev = self.selected()
         if dev:
-            subprocess.run([ACC_BIN, "url", dev["name"]], capture_output=True, text=True)
-            https_off = str(dev.get("http_enabled", "")).lower() == "no"
-            port = dev.get("https_port") if https_off else dev.get("port")
-            scheme = "https" if https_off else "http"
-            Gio.AppInfo.launch_default_for_uri(f"{scheme}://{dev['ip']}:{port}/")
+            Gio.AppInfo.launch_default_for_uri(self._device_url(dev))
 
     def wol_selected(self):
         dev = self.selected()
@@ -146,7 +213,7 @@ class AccWindow(Gtk.ApplicationWindow):
 
 class AccApp(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="com.asustor.acc.native")
+        super().__init__(application_id=APP_ID)
 
     def do_activate(self):
         win = self.get_active_window() or AccWindow(self)

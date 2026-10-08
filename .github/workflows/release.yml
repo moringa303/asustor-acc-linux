@@ -18,11 +18,14 @@ jobs:
         run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o acc ./cmd/acc
       - name: Stage file tree
         run: |
-          mkdir -p stage/usr/bin stage/usr/share/applications stage/usr/share/pixmaps
+          mkdir -p stage/usr/bin stage/usr/share/applications
           install -m755 acc stage/usr/bin/acc
           install -m755 gui/acc-gui.py stage/usr/bin/acc-gui
-          install -m644 assets/icon-256.png stage/usr/share/pixmaps/asustor-acc.png
-          install -m644 packaging/asustor-acc.desktop stage/usr/share/applications/
+          for s in 48 64 128 256 512; do
+            install -Dm644 "assets/icon-$s.png" \
+              "stage/usr/share/icons/hicolor/${s}x${s}/apps/io.github.moringa303.AsustorAcc.png"
+          done
+          install -m644 packaging/io.github.moringa303.AsustorAcc.desktop stage/usr/share/applications/
       - name: Build .deb
         run: |
           mkdir -p deb/DEBIAN && cp -r stage/usr deb/
@@ -35,7 +38,7 @@ jobs:
           Section: net
           Priority: optional
           Description: Native ASUSTOR NAS discovery and management for Linux
-           Unofficial Control Center replacement: mDNS discovery, ADM web UI
+           Unofficial Linux version of ASUSTOR Control Center: mDNS discovery, ADM web UI
            launcher, Wake-on-LAN. CLI (acc) plus GTK4 GUI (acc-gui).
           EOF
           dpkg-deb --build --root-owner-group deb "asustor-acc-linux_${VERSION}_amd64.deb"
@@ -51,15 +54,15 @@ jobs:
           License: MIT
           Requires: python3-gobject, gtk4, xdg-utils
           %description
-          Unofficial Control Center replacement: mDNS discovery, ADM web UI
+          Unofficial Linux version of ASUSTOR Control Center: mDNS discovery, ADM web UI
           launcher, Wake-on-LAN. CLI (acc) plus GTK4 GUI (acc-gui).
           %install
           cp -r ${PWD}/stage/* %{buildroot}/
           %files
           /usr/bin/acc
           /usr/bin/acc-gui
-          /usr/share/applications/asustor-acc.desktop
-          /usr/share/pixmaps/asustor-acc.png
+          /usr/share/applications/io.github.moringa303.AsustorAcc.desktop
+          /usr/share/icons/hicolor/*/apps/io.github.moringa303.AsustorAcc.png
           EOF
           rpmbuild --define "_topdir ${PWD}/rpmtop" \
             --define "__brp_mangle_shebangs %{nil}" \

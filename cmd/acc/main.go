@@ -1,8 +1,9 @@
-// acc — native Linux replacement for ASUSTOR Control Center's core features.
+// acc is the CLI of Asustor ACC for Linux, an unofficial Linux version of
+// the ASUSTOR Control Center.
 //
 // ASUSTOR NAS devices announce themselves via mDNS/DNS-SD:
-//   _ASUSTOR_ADM._tcp.local   — initialized NAS running ADM
-//   _ASUSTOR_INIT._tcp.local  — factory-fresh NAS awaiting initialization
+//   _ASUSTOR_ADM._tcp.local   (initialized NAS running ADM)
+//   _ASUSTOR_INIT._tcp.local  (factory-fresh NAS awaiting initialization)
 // The SRV record carries the ADM web port; TXT records carry model, ADM
 // version, serial number, hostid (MAC, dash-separated), https port, etc.
 // (Protocol determined from ACC 2.1.8's NasScanManagerA.dll.)
@@ -56,7 +57,7 @@ func (n *Nas) applyTxt(txt []string) {
 		case "hostid":
 			n.MAC = strings.ToUpper(strings.ReplaceAll(v, "-", ":"))
 		case "state":
-			n.State = v
+			n.State = displayState(v)
 		case "wol":
 			n.WOL = v
 		case "httpsport":
@@ -69,10 +70,35 @@ func (n *Nas) applyTxt(txt []string) {
 	}
 }
 
+// displayState maps the wire value of the state TXT record to a display
+// name: inited means the NAS runs ADM (Ready), uninited means factory-fresh
+// (Uninitialized), anything else means the NAS is up but ADM is not usable
+// yet (Not ready).
+func displayState(v string) string {
+	switch strings.ToLower(v) {
+	case "inited":
+		return "Ready"
+	case "uninited":
+		return "Uninitialized"
+	case "":
+		return ""
+	}
+	return "Not ready"
+}
+
 func (n *Nas) url() string {
 	host := n.IP
 	if host == "" && n.IPv6 != "" {
 		host = "[" + n.IPv6 + "]"
+	}
+	// An uninitialized NAS serves its setup wizard over plain HTTP,
+	// normally on port 8000.
+	if !n.Initialized {
+		port := n.Port
+		if port == 0 {
+			port = 8000
+		}
+		return fmt.Sprintf("http://%s:%d/", host, port)
 	}
 	// Prefer plain HTTP on the SRV port unless it is disabled.
 	if strings.EqualFold(n.HTTPEnabled, "No") && n.HTTPSPort != "" {
@@ -148,8 +174,12 @@ func builtinScan(timeout time.Duration) ([]Nas, error) {
 					nas.IPv6 = e.AddrIPv6[0].String()
 				}
 				nas.applyTxt(e.Text)
-				if !initialized && nas.State == "" {
-					nas.State = "uninited"
+				if nas.State == "" {
+					if initialized {
+						nas.State = "Ready"
+					} else {
+						nas.State = "Uninitialized"
+					}
 				}
 				vlog("mDNS answer: %s (%s) via %s", e.Instance, nas.IP, service)
 				mu.Lock()

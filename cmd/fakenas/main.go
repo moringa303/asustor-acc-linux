@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -11,8 +12,17 @@ import (
 )
 
 func main() {
+	uninit := flag.Bool("init", false, "advertise a factory-fresh (uninitialized) NAS instead")
+	flag.Parse()
+
+	service := "_ASUSTOR_ADM._tcp"
+	state := "inited"
+	if *uninit {
+		service = "_ASUSTOR_INIT._tcp"
+		state = "uninited"
+	}
 	txt := []string{
-		"state=inited",
+		"state=" + state,
 		"httpenabled=Yes",
 		"httpsport=8001",
 		"model=AS5304T",
@@ -26,7 +36,7 @@ func main() {
 		"hasabnormalvolume=No",
 		"ifnames=eth0",
 	}
-	server, err := zeroconf.Register("AS5304T-TEST", "_ASUSTOR_ADM._tcp", "local.", 8000, txt, nil)
+	server, err := zeroconf.Register("AS5304T-TEST", service, "local.", 8000, txt, nil)
 	if err != nil {
 		log.Fatal(err)
 	}

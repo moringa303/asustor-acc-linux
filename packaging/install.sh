@@ -13,12 +13,16 @@ elif command -v apt-get >/dev/null; then
 elif command -v dnf >/dev/null; then
     sudo dnf install -y python3-gobject gtk4 xdg-utils
 else
-    echo "Unknown distro — install GTK4 + PyGObject + xdg-utils manually." >&2
+    echo "Unknown distro: install GTK4 + PyGObject + xdg-utils manually." >&2
 fi
 
 sudo install -Dm755 usr/bin/acc /usr/local/bin/acc
 sudo install -Dm755 usr/bin/acc-gui /usr/local/bin/acc-gui
-sudo install -Dm644 usr/share/pixmaps/asustor-acc.png /usr/local/share/pixmaps/asustor-acc.png
-sudo install -Dm644 usr/share/applications/asustor-acc.desktop /usr/local/share/applications/asustor-acc.desktop
+for f in usr/share/icons/hicolor/*/apps/io.github.moringa303.AsustorAcc.png; do
+    sudo install -Dm644 "$f" "/usr/local/share/${f#usr/share/}"
+done
+sudo install -Dm644 usr/share/applications/io.github.moringa303.AsustorAcc.desktop \
+    /usr/local/share/applications/io.github.moringa303.AsustorAcc.desktop
+sudo gtk-update-icon-cache -f /usr/local/share/icons/hicolor 2>/dev/null || true
 echo "Installed: acc (CLI) and acc-gui (GUI)."
 echo "If scan finds nothing, run: acc doctor"

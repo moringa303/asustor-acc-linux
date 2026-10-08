@@ -48,8 +48,12 @@ func avahiScan(timeout time.Duration) ([]Nas, bool) {
 			}
 			nas.Port, _ = strconv.Atoi(f[8])
 			nas.applyTxt(parseAvahiTxt(strings.Join(f[9:], ";")))
-			if !svc.initialized && nas.State == "" {
-				nas.State = "uninited"
+			if nas.State == "" {
+				if svc.initialized {
+					nas.State = "Ready"
+				} else {
+					nas.State = "Uninitialized"
+				}
 			}
 			if prev, dup := found[nas.Name]; !dup ||
 				(nas.IP != "" && prev.IP == "") ||
