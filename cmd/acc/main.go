@@ -2,110 +2,29 @@
 // the ASUSTOR Control Center.
 //
 // ASUSTOR NAS devices announce themselves via mDNS/DNS-SD:
-//   _ASUSTOR_ADM._tcp.local   (initialized NAS running ADM)
-//   _ASUSTOR_INIT._tcp.local  (factory-fresh NAS awaiting initialization)
+//
+//	_ASUSTOR_ADM._tcp.local   (initialized NAS running ADM)
+//	_ASUSTOR_INIT._tcp.local  (factory-fresh NAS awaiting initialization)
+//
 // The SRV record carries the ADM web port; TXT records carry model, ADM
 // version, serial number, hostid (MAC, dash-separated), https port, etc.
 // (Protocol determined from ACC 2.1.8's NasScanManagerA.dll.)
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
-	"sort"
+	"strconv"
 	"strings"
-	"sync"
+	"text/tabwriter"
 	"time"
-
-	"github.com/grandcat/zeroconf"
 )
 
-type Nas struct {
-	Name         string `json:"name"`
-	IP           string `json:"ip"`
-	IPv6         string `json:"ipv6,omitempty"`
-	Port         int    `json:"port"`
-	HTTPSPort    string `json:"https_port,omitempty"`
-	HTTPEnabled  string `json:"http_enabled,omitempty"`
-	Model        string `json:"model,omitempty"`
-	ADMVersion   string `json:"adm_version,omitempty"`
-	SerialNumber string `json:"serial_number,omitempty"`
-	MAC          string `json:"mac,omitempty"`
-	State        string `json:"state,omitempty"`
-	WOL          string `json:"wol,omitempty"`
-	ADMUpdate    string `json:"adm_update,omitempty"`
-	Initialized  bool   `json:"initialized"`
-}
-
-func (n *Nas) applyTxt(txt []string) {
-	for _, kv := range txt {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		switch strings.ToLower(k) {
-		case "model":
-			n.Model = v
-		case "version":
-			n.ADMVersion = v
-		case "serialnumber":
-			n.SerialNumber = v
-		case "hostid":
-			n.MAC = strings.ToUpper(strings.ReplaceAll(v, "-", ":"))
-		case "state":
-			n.State = displayState(v)
-		case "wol":
-			n.WOL = v
-		case "httpsport":
-			n.HTTPSPort = v
-		case "httpenabled":
-			n.HTTPEnabled = v
-		case "admupdate":
-			n.ADMUpdate = v
-		}
-	}
-}
-
-// displayState maps the wire value of the state TXT record to a display
-// name: inited means the NAS runs ADM (Ready), uninited means factory-fresh
-// (Uninitialized), anything else means the NAS is up but ADM is not usable
-// yet (Not ready).
-func displayState(v string) string {
-	switch strings.ToLower(v) {
-	case "inited":
-		return "Ready"
-	case "uninited":
-		return "Uninitialized"
-	case "":
-		return ""
-	}
-	return "Not ready"
-}
-
-func (n *Nas) url() string {
-	host := n.IP
-	if host == "" && n.IPv6 != "" {
-		host = "[" + n.IPv6 + "]"
-	}
-	// An uninitialized NAS serves its setup wizard over plain HTTP,
-	// normally on port 8000.
-	if !n.Initialized {
-		port := n.Port
-		if port == 0 {
-			port = 8000
-		}
-		return fmt.Sprintf("http://%s:%d/", host, port)
-	}
-	// Prefer plain HTTP on the SRV port unless it is disabled.
-	if strings.EqualFold(n.HTTPEnabled, "No") && n.HTTPSPort != "" {
-		return fmt.Sprintf("https://%s:%s/", host, n.HTTPSPort)
-	}
-	return fmt.Sprintf("http://%s:%d/", host, n.Port)
-}
+// version is set at build time: -ldflags "-X main.version=1.3.0".
+var version = "dev"
 
 var (
 	verbose   bool
@@ -118,160 +37,140 @@ func vlog(format string, args ...any) {
 	}
 }
 
-func scan(timeout time.Duration) ([]Nas, error) {
-	list, err := builtinScan(timeout)
-	if err != nil {
-		vlog("built-in mDNS scan failed: %v", err)
-	}
-	vlog("built-in mDNS scan found %d device(s)", len(list))
-	if len(list) == 0 {
-		if avahiList, ok := avahiScan(timeout); ok {
-			vlog("avahi-browse scan found %d device(s)", len(avahiList))
-			if len(avahiList) > 0 {
-				sort.Slice(avahiList, func(i, j int) bool { return avahiList[i].Name < avahiList[j].Name })
-				return avahiList, nil
-			}
-		} else {
-			vlog("avahi-browse not available, no fallback")
-		}
-	}
-	return list, err
-}
-
-func builtinScan(timeout time.Duration) ([]Nas, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	var opts []zeroconf.ClientOption
-	if ifaceName != "" {
-		ifc, err := net.InterfaceByName(ifaceName)
-		if err != nil {
-			return nil, fmt.Errorf("interface %q: %w", ifaceName, err)
-		}
-		opts = append(opts, zeroconf.SelectIfaces([]net.Interface{*ifc}))
-	}
-
-	var mu sync.Mutex
-	found := map[string]Nas{}
-
-	browse := func(service string, initialized bool) error {
-		resolver, err := zeroconf.NewResolver(opts...)
-		if err != nil {
-			return err
-		}
-		entries := make(chan *zeroconf.ServiceEntry)
-		go func() {
-			for e := range entries {
-				nas := Nas{
-					Name:        e.Instance,
-					Port:        e.Port,
-					Initialized: initialized,
-				}
-				if len(e.AddrIPv4) > 0 {
-					nas.IP = e.AddrIPv4[0].String()
-				}
-				if len(e.AddrIPv6) > 0 {
-					nas.IPv6 = e.AddrIPv6[0].String()
-				}
-				nas.applyTxt(e.Text)
-				if nas.State == "" {
-					if initialized {
-						nas.State = "Ready"
-					} else {
-						nas.State = "Uninitialized"
-					}
-				}
-				vlog("mDNS answer: %s (%s) via %s", e.Instance, nas.IP, service)
-				mu.Lock()
-				// Keyed by instance name; ADM entry wins over INIT entry.
-				if prev, dup := found[e.Instance]; !dup || (initialized && !prev.Initialized) {
-					found[e.Instance] = nas
-				}
-				mu.Unlock()
-			}
-		}()
-		return resolver.Browse(ctx, service, "local.", entries)
-	}
-
-	if err := browse("_ASUSTOR_ADM._tcp", true); err != nil {
-		return nil, err
-	}
-	if err := browse("_ASUSTOR_INIT._tcp", false); err != nil {
-		return nil, err
-	}
-	<-ctx.Done()
-
-	mu.Lock()
-	defer mu.Unlock()
-	list := make([]Nas, 0, len(found))
-	for _, n := range found {
-		list = append(list, n)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
-	return list, nil
-}
-
-func findNas(target string, timeout time.Duration) (*Nas, error) {
-	list, err := scan(timeout)
-	if err != nil {
-		return nil, err
-	}
-	for i := range list {
-		n := &list[i]
-		if strings.EqualFold(n.Name, target) || n.IP == target || strings.EqualFold(n.MAC, target) {
-			return n, nil
-		}
-	}
-	return nil, fmt.Errorf("no NAS matching %q found (try 'acc scan')", target)
-}
-
-func sendWOL(mac string) error {
-	hw, err := net.ParseMAC(mac)
-	if err != nil {
-		return fmt.Errorf("invalid MAC %q: %w", mac, err)
-	}
-	packet := make([]byte, 0, 102)
-	packet = append(packet, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
-	for i := 0; i < 16; i++ {
-		packet = append(packet, hw...)
-	}
-	conn, err := net.Dial("udp", "255.255.255.255:9")
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	_, err = conn.Write(packet)
-	return err
-}
-
-func printTable(list []Nas) {
+func printTable(list []Nas, now time.Time) {
 	if len(list) == 0 {
 		fmt.Println("No ASUSTOR NAS devices found.")
 		return
 	}
-	w := func(cols ...string) {
-		fmt.Printf("%-20s %-16s %-12s %-12s %-18s %-10s %-6s %s\n",
-			cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7])
-	}
-	w("NAME", "IP", "MODEL", "SERIAL", "MAC", "ADM", "PORT", "STATE")
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tIP\tMODEL\tSERIAL\tMAC\tADM\tPORT\tSTATE\tONLINE")
 	for _, n := range list {
-		w(n.Name, n.IP, n.Model, n.SerialNumber, n.MAC, n.ADMVersion, fmt.Sprint(n.Port), n.State)
+		state, port := n.State, ""
+		if !n.Online {
+			state = "Offline"
+		}
+		if n.Port != 0 {
+			port = strconv.Itoa(n.Port)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			n.Name, n.IP, n.Model, n.SerialNumber, n.MAC, n.ADMVersion, port, state, formatOnline(n, now))
+	}
+	tw.Flush()
+}
+
+// formatOnline renders the ONLINE column: for how long the NAS has
+// answered every scan, or when it was last seen.
+func formatOnline(n Nas, now time.Time) string {
+	if n.Online {
+		return formatDuration(now.Sub(n.OnlineSince))
+	}
+	if n.LastSeen.IsZero() {
+		return "never seen"
+	}
+	return "last seen " + formatSeen(n.LastSeen, now)
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	switch {
+	case d < 0:
+		return "0s"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm %02ds", int(d.Minutes()), int(d.Seconds())%60)
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dd %dh", int(d.Hours())/24, int(d.Hours())%24)
+}
+
+func formatSeen(t, now time.Time) string {
+	t, now = t.Local(), now.Local()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	return t.Format("2 Jan 15:04")
+}
+
+func onlineOnly(list []Nas) []Nas {
+	out := make([]Nas, 0, len(list))
+	for _, n := range list {
+		if n.Online {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func printJSON(list []Nas) {
+	if list == nil {
+		list = []Nas{}
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(list)
+}
+
+// watchScan rescans every interval and redraws the table in place.
+func watchScan(timeout, interval time.Duration, all, asJSON bool) {
+	for {
+		list, err := scan(timeout)
+		if !all {
+			list = onlineOnly(list)
+		}
+		now := time.Now()
+		if asJSON {
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "acc:", err)
+			} else {
+				json.NewEncoder(os.Stdout).Encode(list)
+			}
+		} else {
+			fmt.Print("\033[H\033[2J")
+			fmt.Printf("acc scan --watch   every %s   last scan %s   (Ctrl-C to stop)\n\n",
+				interval, now.Format("15:04:05"))
+			if err != nil {
+				fmt.Println("scan failed:", err)
+			} else {
+				printTable(list, now)
+			}
+		}
+		time.Sleep(interval)
 	}
 }
 
+func openBrowser(url string) error {
+	if err := exec.Command("xdg-open", url).Start(); err != nil {
+		return fmt.Errorf("cannot start a browser (%w); open %s yourself", err, url)
+	}
+	return nil
+}
+
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: acc <command> [args]
+	fmt.Fprintf(os.Stderr, `Usage: acc <command> [options] [argument]
 
 Commands:
-  scan [--json] [--timeout <seconds>]   discover ASUSTOR NAS devices via mDNS
-  open <name|ip>                        open the NAS web UI (ADM) in the browser
-  url <name|ip>                         print the NAS web UI URL
-  wol <name|ip|mac>                     send a Wake-on-LAN magic packet
-  doctor                                diagnose why discovery finds nothing
+  scan                   discover ASUSTOR NAS devices via mDNS
+  open <name|ip|mac>     open the NAS web UI (ADM) in the browser
+  url <name|ip|mac>      print the NAS web UI URL
+  wol <name|ip|mac>      send a Wake-on-LAN magic packet; works for a
+                         sleeping NAS that acc has seen before
+  forget <name|ip|mac>   drop a NAS from acc's device memory (--all: every one)
+  doctor                 diagnose why discovery finds nothing
+  version                print the acc version
 
 Options:
-  --iface <name>    restrict scanning to one network interface
-  --verbose, -v     explain what the scan is doing on stderr
+  --json                 machine-readable output (scan)
+  --all                  also list remembered devices that did not answer (scan)
+  --watch                rescan continuously and redraw the table (scan)
+  --interval <seconds>   rescan interval for --watch (default 30)
+  --timeout <seconds>    how long to listen for answers (default 4)
+  --iface <name>         restrict scanning and Wake-on-LAN to one interface
+  --verbose, -v          explain what is going on, on stderr
+
+The ONLINE column is for how long the NAS has answered every scan without
+a miss, as observed by acc; ADM does not announce its uptime.
 `)
 	os.Exit(2)
 }
@@ -280,62 +179,91 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 	}
-	timeout := 4 * time.Second
+	cmd := os.Args[1]
 	args := os.Args[2:]
-	asJSON := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--json":
-			asJSON = true
-			args = append(args[:i], args[i+1:]...)
-			i--
-		case "--verbose", "-v":
-			verbose = true
-			args = append(args[:i], args[i+1:]...)
-			i--
-		case "--iface":
-			if i+1 >= len(args) {
-				usage()
-			}
-			ifaceName = args[i+1]
-			args = append(args[:i], args[i+2:]...)
-			i--
-		case "--timeout":
-			if i+1 >= len(args) {
-				usage()
-			}
-			var secs float64
-			fmt.Sscanf(args[i+1], "%g", &secs)
-			if secs > 0 {
-				timeout = time.Duration(secs * float64(time.Second))
-			}
-			args = append(args[:i], args[i+2:]...)
-			i--
-		}
-	}
-
+	var (
+		timeout    = 4 * time.Second
+		interval   = 30 * time.Second
+		timeoutSet bool
+		asJSON     bool
+		all        bool
+		watch      bool
+	)
 	fail := func(err error) {
 		fmt.Fprintln(os.Stderr, "acc:", err)
 		os.Exit(1)
 	}
+	seconds := func(flag, s string) time.Duration {
+		secs, err := strconv.ParseFloat(s, 64)
+		if err != nil || secs <= 0 {
+			fail(fmt.Errorf("%s wants a positive number of seconds, not %q", flag, s))
+		}
+		return time.Duration(secs * float64(time.Second))
+	}
+	for i := 0; i < len(args); i++ {
+		consumed := 1
+		switch args[i] {
+		case "--json":
+			asJSON = true
+		case "--all":
+			all = true
+		case "--watch":
+			watch = true
+		case "--verbose", "-v":
+			verbose = true
+		case "--iface", "--timeout", "--interval":
+			if i+1 >= len(args) {
+				usage()
+			}
+			consumed = 2
+			switch args[i] {
+			case "--iface":
+				ifaceName = args[i+1]
+				if _, err := net.InterfaceByName(ifaceName); err != nil {
+					fail(fmt.Errorf("interface %q: %w", ifaceName, err))
+				}
+			case "--timeout":
+				timeout, timeoutSet = seconds("--timeout", args[i+1]), true
+			case "--interval":
+				interval = seconds("--interval", args[i+1])
+			}
+		case "--help", "-h":
+			usage()
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				fail(fmt.Errorf("unknown option %s", args[i]))
+			}
+			consumed = 0
+		}
+		if consumed > 0 {
+			args = append(args[:i], args[i+consumed:]...)
+			i--
+		}
+	}
 
-	switch os.Args[1] {
+	switch cmd {
+	case "version", "--version", "-V":
+		fmt.Println("acc", version)
 	case "doctor":
-		if timeout == 4*time.Second {
+		if !timeoutSet {
 			timeout = 5 * time.Second
 		}
 		doctor(timeout)
 	case "scan":
+		if watch {
+			watchScan(timeout, interval, all, asJSON)
+		}
 		list, err := scan(timeout)
 		if err != nil {
 			fail(err)
 		}
+		if !all {
+			list = onlineOnly(list)
+		}
 		if asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			enc.Encode(list)
+			printJSON(list)
 		} else {
-			printTable(list)
+			printTable(list, time.Now())
 		}
 	case "open", "url":
 		if len(args) != 1 {
@@ -345,32 +273,66 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		if os.Args[1] == "url" {
-			fmt.Println(nas.url())
+		if nas.URL == "" {
+			fail(fmt.Errorf("%s did not report an address", nas.Name))
+		}
+		if cmd == "url" {
+			fmt.Println(nas.URL)
 			return
 		}
-		if err := exec.Command("xdg-open", nas.url()).Start(); err != nil {
+		if !nas.Online {
+			fail(fmt.Errorf("%s is not answering (last seen %s); wake it with 'acc wol %s'",
+				nas.Name, formatSeen(nas.LastSeen, time.Now()), nas.Name))
+		}
+		if err := openBrowser(nas.URL); err != nil {
 			fail(err)
 		}
 	case "wol":
 		if len(args) != 1 {
 			usage()
 		}
-		mac := args[0]
-		if _, err := net.ParseMAC(mac); err != nil {
-			nas, err := findNas(args[0], timeout)
+		target := args[0]
+		var mac, ip, name string
+		// The device memory answers without a scan: a NAS that is asleep
+		// cannot be discovered, which is the whole point of waking it.
+		for _, n := range loadMemory() {
+			if n.matches(target) {
+				mac, ip, name = n.MAC, n.IP, n.Name
+				break
+			}
+		}
+		if hw, err := net.ParseMAC(target); err == nil {
+			mac = hw.String()
+		} else if mac == "" {
+			nas, err := findNas(target, timeout)
 			if err != nil {
 				fail(err)
 			}
-			if nas.MAC == "" {
-				fail(fmt.Errorf("NAS %q did not report a MAC address", nas.Name))
-			}
-			mac = nas.MAC
+			mac, ip, name = nas.MAC, nas.IP, nas.Name
 		}
-		if err := sendWOL(mac); err != nil {
+		if mac == "" {
+			fail(fmt.Errorf("%s did not report a MAC address", name))
+		}
+		sent, err := sendWOL(mac, ip)
+		if err != nil {
 			fail(err)
 		}
-		fmt.Println("Magic packet sent to", mac)
+		if name != "" {
+			fmt.Printf("Magic packet sent to %s (%s) via %s\n", name, strings.ToUpper(mac), strings.Join(sent, ", "))
+		} else {
+			fmt.Printf("Magic packet sent to %s via %s\n", strings.ToUpper(mac), strings.Join(sent, ", "))
+		}
+	case "forget":
+		target := ""
+		switch {
+		case all && len(args) == 0:
+		case !all && len(args) == 1:
+			target = args[0]
+		default:
+			usage()
+		}
+		n := forget(target)
+		fmt.Printf("Forgot %d device(s).\n", n)
 	default:
 		usage()
 	}

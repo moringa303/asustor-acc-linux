@@ -13,6 +13,10 @@ import (
 
 func main() {
 	uninit := flag.Bool("init", false, "advertise a factory-fresh (uninitialized) NAS instead")
+	name := flag.String("name", "AS5304T-TEST", "instance name of the fake NAS")
+	model := flag.String("model", "AS5304T", "model reported in the TXT record")
+	mac := flag.String("mac", "00-11-32-aa-bb-cc", "MAC reported as hostid (dash-separated)")
+	port := flag.Int("port", 8000, "ADM web port announced in the SRV record")
 	flag.Parse()
 
 	service := "_ASUSTOR_ADM._tcp"
@@ -25,23 +29,23 @@ func main() {
 		"state=" + state,
 		"httpenabled=Yes",
 		"httpsport=8001",
-		"model=AS5304T",
+		"model=" + *model,
 		"version=4.3.3.RC92",
 		"admupdate=No",
 		"bios=1.0",
-		"hostid=00-11-32-aa-bb-cc",
+		"hostid=" + *mac,
 		"serialnumber=AS2025TEST01",
 		"wol=Yes",
 		"appupdatable=No",
 		"hasabnormalvolume=No",
 		"ifnames=eth0",
 	}
-	server, err := zeroconf.Register("AS5304T-TEST", service, "local.", 8000, txt, nil)
+	server, err := zeroconf.Register(*name, service, "local.", *port, txt, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer server.Shutdown()
-	log.Println("fake NAS advertised, ctrl-c to stop")
+	log.Printf("fake NAS %q advertised as %s on port %d, ctrl-c to stop", *name, service, *port)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 	<-sig
