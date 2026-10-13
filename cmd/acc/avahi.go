@@ -1,78 +1,84 @@
 package main
 
 import (
+	"context"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // avahiScan discovers NAS devices through the system's avahi-daemon via
-// avahi-browse. On desktops where avahi owns the mDNS socket, this is more
-// reliable than a standalone mDNS listener.
+// avahi-browse. On desktops where avahi owns the mDNS socket, this sees
+// unicast replies that a standalone mDNS listener never receives. The
+// second result is false when avahi-browse is not installed or could not
+// talk to the daemon.
 func avahiScan(timeout time.Duration) ([]Nas, bool) {
 	if _, err := exec.LookPath("avahi-browse"); err != nil {
+		vlog("avahi-browse not installed")
 		return nil, false
 	}
-	found := map[string]Nas{}
-	ok := false
+	var (
+		mu    sync.Mutex
+		found = map[string]Nas{}
+		ran   bool
+		wg    sync.WaitGroup
+	)
 	for _, svc := range []struct {
 		name        string
 		initialized bool
 	}{{"_ASUSTOR_ADM._tcp", true}, {"_ASUSTOR_INIT._tcp", false}} {
-		cmd := exec.Command("avahi-browse", "--parsable", "--resolve", "--terminate", svc.name)
-		done := make(chan struct{})
-		var out []byte
-		go func() { out, _ = cmd.Output(); close(done) }()
-		select {
-		case <-done:
-			ok = true
-		case <-time.After(timeout + 2*time.Second):
-			cmd.Process.Kill()
-			<-done
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			f := strings.Split(line, ";")
-			// =;iface;proto;instance;type;domain;hostname;address;port;"k=v" "k=v"
-			if len(f) < 10 || f[0] != "=" {
-				continue
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// --terminate ends after avahi's "all for now"; the deadline
+			// only guards against a wedged daemon.
+			ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "avahi-browse",
+				"--parsable", "--resolve", "--terminate", svc.name).Output()
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil && len(out) == 0 {
+				vlog("avahi-browse %s: %v", svc.name, err)
+				return
 			}
-			nas := Nas{
-				Name:        avahiUnescape(f[3]),
-				Initialized: svc.initialized,
-			}
-			if strings.Contains(f[7], ":") {
-				nas.IPv6 = f[7]
-			} else {
-				nas.IP = f[7]
-			}
-			nas.Port, _ = strconv.Atoi(f[8])
-			nas.applyTxt(parseAvahiTxt(strings.Join(f[9:], ";")))
-			if nas.State == "" {
-				if svc.initialized {
-					nas.State = "Ready"
+			ran = true
+			for _, line := range strings.Split(string(out), "\n") {
+				f := strings.Split(line, ";")
+				// =;iface;proto;instance;type;domain;hostname;address;port;"k=v" "k=v"
+				if len(f) < 10 || f[0] != "=" {
+					continue
+				}
+				if ifaceName != "" && f[1] != ifaceName {
+					continue
+				}
+				nas := Nas{
+					Name:        avahiUnescape(f[3]),
+					Initialized: svc.initialized,
+				}
+				if strings.Contains(f[7], ":") {
+					nas.IPv6 = f[7]
 				} else {
-					nas.State = "Uninitialized"
+					nas.IP = f[7]
 				}
+				nas.Port, _ = strconv.Atoi(f[8])
+				nas.applyTxt(parseAvahiTxt(strings.Join(f[9:], ";")))
+				if nas.State == "" {
+					if svc.initialized {
+						nas.State = "Ready"
+					} else {
+						nas.State = "Uninitialized"
+					}
+				}
+				vlog("avahi answer: %s (%s) via %s", nas.Name, nas.IP, svc.name)
+				mergeNas(found, nas)
 			}
-			if prev, dup := found[nas.Name]; !dup ||
-				(nas.IP != "" && prev.IP == "") ||
-				(svc.initialized && !prev.Initialized) {
-				if dup && nas.IP == "" {
-					nas.IP = prev.IP
-				}
-				if dup && nas.IPv6 == "" {
-					nas.IPv6 = prev.IPv6
-				}
-				found[nas.Name] = nas
-			}
-		}
+		}()
 	}
-	list := make([]Nas, 0, len(found))
-	for _, n := range found {
-		list = append(list, n)
-	}
-	return list, ok
+	wg.Wait()
+	return sortedByName(found), ran
 }
 
 // avahiUnescape decodes avahi's \ddd decimal escapes (e.g. \032 = space).

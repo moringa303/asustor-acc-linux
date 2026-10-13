@@ -1,19 +1,32 @@
 #!/usr/bin/env python3
 """GTK4 GUI of Asustor ACC for Linux.
 
-Discovery, WOL and URL handling are done by the bundled `acc` binary;
-this window presents the results like the Control Center device list.
+Discovery, Wake-on-LAN and the device memory live in the bundled `acc`
+binary; this window presents its results like the Control Center device
+list, keeps them fresh, and shows for how long each NAS has been online.
 """
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
+from datetime import datetime
 
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, GLib, Gio  # noqa: E402
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+
+# libadwaita is optional. With it the window follows the system's
+# light/dark preference and gets the current GNOME header bar look.
+try:
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw  # noqa: E402
+except (ValueError, ImportError):
+    Adw = None
+
 
 def _find_acc():
     override = os.environ.get("ACC_BIN")
@@ -30,190 +43,715 @@ ACC_BIN = _find_acc()
 # Must match the installed .desktop file name and the hicolor icon name,
 # or GNOME shows a generic gear icon for the window.
 APP_ID = "io.github.moringa303.AsustorAcc"
+WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
 
+SCAN_TIMEOUT = 4  # seconds acc listens for answers
+REFRESH_SECONDS = int(os.environ.get("ACC_GUI_REFRESH", "30"))
+
+# Table columns: title, Device property, whether the column takes the
+# spare width.
 COLUMNS = [
-    ("Name", "name"),
-    ("IP", "ip"),
-    ("Model", "model"),
-    ("Serial Number", "serial_number"),
-    ("MAC Address", "mac"),
-    ("ADM Version", "adm_version"),
-    ("Port", "port"),
-    ("State", "state"),
+    ("Name", "name", True),
+    ("IP Address", "ip", False),
+    ("Model", "model", False),
+    ("Serial Number", "serial", False),
+    ("MAC Address", "mac", False),
+    ("ADM", "adm", False),
+    ("Port", "port", False),
+    ("State", "state", False),
+    ("Online", "online_text", False),
 ]
-STATE_COL = len(COLUMNS) - 1
+TABULAR = {"ip", "serial", "mac", "adm", "port", "online_text"}
 
-# Wire values an older acc binary may still pass through, mapped to the
-# display names.
-STATE_NAMES = {"inited": "Ready", "uninited": "Uninitialized"}
-STATE_COLORS = {"Ready": "#2ec27e", "Uninitialized": "#3584e4", "Not ready": "#e5a50a"}
+STATE_CLASSES = {
+    "Ready": "ready",
+    "Uninitialized": "uninitialized",
+    "Not ready": "notready",
+    "Offline": "offline",
+}
+
+CSS = """
+.state-dot { min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }
+.state-dot.ready { background: #2ec27e; }
+.state-dot.uninitialized { background: #3584e4; }
+.state-dot.notready { background: #e5a50a; }
+.state-dot.offline { background: #9a9996; }
+columnview > listview > row > cell { padding: 7px 12px; }
+.tabular { font-variant-numeric: tabular-nums; }
+.empty-title { font-size: 1.4em; font-weight: bold; }
+.statusbar { padding: 6px 12px; }
+"""
+
+
+def _parse_time(value):
+    """RFC 3339 timestamp from acc -> epoch seconds, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def format_duration(seconds):
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60:02d}s"
+    if s < 86400:
+        return f"{s // 3600}h {s % 3600 // 60:02d}m"
+    return f"{s // 86400}d {s % 86400 // 3600}h"
+
+
+def format_seen(epoch):
+    t = datetime.fromtimestamp(epoch)
+    if t.date() == datetime.now().date():
+        return t.strftime("%H:%M")
+    return t.strftime("%-d %b")
+
+
+class Device(GObject.Object):
+    """One NAS as reported by `acc scan --json --all`.
+
+    Everything the table shows is a property, so cells stay bound to the
+    object and update in place when a later scan changes it.
+    """
+
+    name = GObject.Property(type=str, default="")
+    ip = GObject.Property(type=str, default="")
+    model = GObject.Property(type=str, default="")
+    serial = GObject.Property(type=str, default="")
+    mac = GObject.Property(type=str, default="")
+    adm = GObject.Property(type=str, default="")
+    port = GObject.Property(type=str, default="")
+    state = GObject.Property(type=str, default="")
+    online = GObject.Property(type=bool, default=False)
+    online_text = GObject.Property(type=str, default="")
+    online_tip = GObject.Property(type=str, default="")
+
+    def __init__(self, data):
+        super().__init__()
+        self.data = {}
+        self.online_since = None
+        self.last_seen = None
+        self.update(data)
+
+    @staticmethod
+    def key_of(data):
+        return data.get("mac") or (data.get("name") or "").lower()
+
+    @property
+    def key(self):
+        return self.key_of(self.data)
+
+    @property
+    def url(self):
+        return self.data.get("url") or ""
+
+    @property
+    def initialized(self):
+        return bool(self.data.get("initialized"))
+
+    def update(self, data):
+        self.data = data
+        self.name = data.get("name") or ""
+        self.ip = data.get("ip") or data.get("ipv6") or ""
+        self.model = data.get("model") or ""
+        self.serial = data.get("serial_number") or ""
+        self.mac = data.get("mac") or ""
+        self.adm = data.get("adm_version") or ""
+        self.port = str(data.get("port") or "")
+        self.online = bool(data.get("online"))
+        self.state = (data.get("state") or "") if self.online else "Offline"
+        self.online_since = _parse_time(data.get("online_since"))
+        self.last_seen = _parse_time(data.get("last_seen"))
+        self.tick()
+
+    def tick(self):
+        """Refresh the Online column text for the current time."""
+        if self.online and self.online_since:
+            text = format_duration(time.time() - self.online_since)
+            since = datetime.fromtimestamp(self.online_since).strftime("%-d %b %H:%M:%S")
+            tip = (f"Answering every scan since {since}.\n"
+                   "Observed by acc; ADM does not announce its uptime.")
+        elif self.last_seen:
+            text = "last seen " + format_seen(self.last_seen)
+            seen = datetime.fromtimestamp(self.last_seen).strftime("%-d %b %Y %H:%M:%S")
+            tip = f"Last answered a scan on {seen}."
+        else:
+            text, tip = "", ""
+        if text != self.online_text:
+            self.online_text = text
+        if tip != self.online_tip:
+            self.online_tip = tip
 
 
 class AccWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Asustor ACC for Linux")
         self.set_icon_name(APP_ID)
-        self.set_default_size(980, 480)
-        self.devices = []
+        self.set_default_size(1100, 560)
+        self.scanning = False
+        self.auto_refresh = True
+        self.show_offline = True
+        self.last_scan = None
+        self.last_error = None
+        self.acc_version = ""
+        self._status_timer = None
+        self._name_cells = {}
 
+        self._build_actions()
+        self._build_header()
+        self._build_table()
+        self._build_body()
+
+        GLib.timeout_add_seconds(1, self._tick)
+        GLib.timeout_add_seconds(REFRESH_SECONDS, self._auto_scan)
+        self._run_acc(["version"], self._got_version)
+        self.scan()
+
+    # -- construction ----------------------------------------------------
+    def _build_actions(self):
+        plain = [
+            ("scan", self.scan),
+            ("open", self.open_selected),
+            ("wake", self.wake_selected),
+            ("copy-ip", lambda: self._copy("ip")),
+            ("copy-mac", lambda: self._copy("mac")),
+            ("forget", self.forget_selected),
+            ("forget-offline", self.forget_offline),
+            ("doctor", self.run_doctor),
+            ("about", self.show_about),
+        ]
+        for name, callback in plain:
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", lambda _a, _p, cb=callback: cb())
+            self.add_action(action)
+        for name, attr in (("auto-refresh", "auto_refresh"), ("show-offline", "show_offline")):
+            action = Gio.SimpleAction.new_stateful(
+                name, None, GLib.Variant.new_boolean(getattr(self, attr)))
+            action.connect("change-state", self._toggle, attr)
+            self.add_action(action)
+
+    def _toggle(self, action, value, attr):
+        action.set_state(value)
+        setattr(self, attr, value.get_boolean())
+        if attr == "show_offline":
+            self.filter.changed(Gtk.FilterChange.DIFFERENT)
+            self._refresh_summary()
+
+    def _build_header(self):
         header = Gtk.HeaderBar()
         self.set_titlebar(header)
 
-        self.scan_btn = Gtk.Button(label="Scan")
-        self.scan_btn.add_css_class("suggested-action")
-        self.scan_btn.set_tooltip_text("Search the local network for ASUSTOR NAS devices")
-        self.scan_btn.connect("clicked", lambda *_: self.scan())
-        header.pack_start(self.scan_btn)
-
+        scan_btn = Gtk.Button(action_name="win.scan")
+        content = Gtk.Box(spacing=6)
+        content.append(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
+        content.append(Gtk.Label(label="Scan"))
+        scan_btn.set_child(content)
+        scan_btn.set_tooltip_text("Search the local network for ASUSTOR NAS devices (F5)")
+        header.pack_start(scan_btn)
         self.spinner = Gtk.Spinner()
         header.pack_start(self.spinner)
 
-        self.open_btn = Gtk.Button(label="Open ADM")
-        self.open_btn.set_tooltip_text("Open the web interface of the selected NAS")
-        self.open_btn.connect("clicked", lambda *_: self.open_selected())
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        title = Gtk.Label(label="Asustor ACC")
+        title.add_css_class("title")
+        self.subtitle = Gtk.Label(label="Scanning the local network…")
+        self.subtitle.add_css_class("subtitle")
+        titles.append(title)
+        titles.append(self.subtitle)
+        header.set_title_widget(titles)
+
+        menu = Gio.Menu()
+        section = Gio.Menu()
+        section.append(f"Refresh every {REFRESH_SECONDS} s", "win.auto-refresh")
+        section.append("Show offline devices", "win.show-offline")
+        menu.append_section(None, section)
+        section = Gio.Menu()
+        section.append("Diagnose discovery…", "win.doctor")
+        section.append("Forget offline devices", "win.forget-offline")
+        menu.append_section(None, section)
+        section = Gio.Menu()
+        section.append("About Asustor ACC", "win.about")
+        menu.append_section(None, section)
+        menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True)
+        menu_btn.set_tooltip_text("Menu (F10)")
+        header.pack_end(menu_btn)
+
+        self.open_btn = Gtk.Button(label="Open ADM", action_name="win.open")
+        self.open_btn.add_css_class("suggested-action")
+        self.open_btn.set_tooltip_text("Open the web interface of the selected NAS (Ctrl+O)")
         header.pack_end(self.open_btn)
+        wake_btn = Gtk.Button(label="Wake", action_name="win.wake")
+        wake_btn.set_tooltip_text("Send a Wake-on-LAN magic packet to the selected NAS")
+        header.pack_end(wake_btn)
 
-        self.wol_btn = Gtk.Button(label="Wake (WOL)")
-        self.wol_btn.set_tooltip_text("Send a Wake-on-LAN packet to the selected NAS")
-        self.wol_btn.connect("clicked", lambda *_: self.wol_selected())
-        header.pack_end(self.wol_btn)
+    def _build_table(self):
+        self.store = Gio.ListStore.new(Device)
+        self.filter = Gtk.CustomFilter.new(lambda dev, *_: self.show_offline or dev.online)
+        filtered = Gtk.FilterListModel.new(self.store, self.filter)
+        self.sorted = Gtk.SortListModel.new(filtered, None)
+        self.selection = Gtk.SingleSelection.new(self.sorted)
+        self.selection.set_autoselect(False)
+        self.selection.set_can_unselect(True)
+        self.selection.connect("notify::selected-item", lambda *_: self._selection_changed())
 
-        self.store = Gtk.ListStore(*([str] * len(COLUMNS)))
-        self.view = Gtk.TreeView(model=self.store)
-        for i, (title, _) in enumerate(COLUMNS):
-            renderer = Gtk.CellRendererText()
-            renderer.set_padding(10, 5)
-            col = Gtk.TreeViewColumn(title, renderer, text=i)
+        self.view = Gtk.ColumnView.new(self.selection)
+        self.sorted.set_sorter(self.view.get_sorter())
+        self.view.connect("activate", lambda _v, pos: self._open(self.sorted.get_item(pos)))
+        name_col = None
+        for title, prop, expand in COLUMNS:
+            factory = Gtk.SignalListItemFactory()
+            factory.connect("setup", self._setup_cell, prop)
+            factory.connect("bind", self._bind_cell, prop)
+            factory.connect("unbind", self._unbind_cell, prop)
+            col = Gtk.ColumnViewColumn.new(title, factory)
+            col.set_expand(expand)
             col.set_resizable(True)
-            if i == 0:
-                col.set_expand(True)
-            if i == STATE_COL:
-                col.set_cell_data_func(renderer, self._state_cell)
+            col.set_sorter(Gtk.CustomSorter.new(lambda a, b, *_, p=prop: self._compare(a, b, p)))
             self.view.append_column(col)
+            if prop == "name":
+                name_col = col
+        self.view.sort_by_column(name_col, Gtk.SortType.ASCENDING)
 
-        # Uninitialized NAS rows get a link icon that opens the ADM setup
-        # wizard (plain HTTP, port 8000).
-        setup_renderer = Gtk.CellRendererPixbuf()
-        self.setup_col = Gtk.TreeViewColumn("Setup", setup_renderer)
-        self.setup_col.set_cell_data_func(setup_renderer, self._setup_cell)
-        self.view.append_column(self.setup_col)
-
-        self.view.connect("row-activated", lambda *_: self.open_selected())
-        click = Gtk.GestureClick()
-        click.connect("released", self._view_clicked)
+        # Right click: select the row under the pointer and show its menu.
+        model = Gio.Menu()
+        section = Gio.Menu()
+        section.append("Open ADM", "win.open")
+        section.append("Wake (WOL)", "win.wake")
+        model.append_section(None, section)
+        section = Gio.Menu()
+        section.append("Copy IP address", "win.copy-ip")
+        section.append("Copy MAC address", "win.copy-mac")
+        model.append_section(None, section)
+        section = Gio.Menu()
+        section.append("Forget this device", "win.forget")
+        model.append_section(None, section)
+        self.row_menu = Gtk.PopoverMenu.new_from_model(model)
+        self.row_menu.set_parent(self.view)
+        self.row_menu.set_has_arrow(False)
+        click = Gtk.GestureClick(button=3)
+        click.connect("pressed", self._row_right_click)
         self.view.add_controller(click)
 
-        scroll = Gtk.ScrolledWindow(vexpand=True)
-        scroll.set_child(self.view)
+    def _build_body(self):
+        scroll = Gtk.ScrolledWindow(vexpand=True, child=self.view)
+        self.stack = Gtk.Stack(vexpand=True)
+        self.stack.add_named(scroll, "list")
+        self.stack.add_named(self._build_empty_page(), "empty")
 
-        self.status = Gtk.Label(label="Press Scan to search for ASUSTOR NAS devices.",
-                                xalign=0, margin_start=12, margin_top=6, margin_bottom=6)
+        self.status = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        self.status.add_css_class("dim-label")
+        self.status.add_css_class("statusbar")
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.append(scroll)
+        box.append(self.stack)
+        box.append(Gtk.Separator())
         box.append(self.status)
         self.set_child(box)
+        self._set_hint()
 
-        self.scan()
+    def _build_empty_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                       valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER,
+                       margin_start=24, margin_end=24)
+        icon = Gtk.Image.new_from_icon_name("network-server-symbolic")
+        icon.set_pixel_size(96)
+        icon.add_css_class("dim-label")
+        self.empty_title = Gtk.Label(label="No ASUSTOR NAS found")
+        self.empty_title.add_css_class("empty-title")
+        self.empty_text = Gtk.Label(wrap=True, max_width_chars=52, justify=Gtk.Justification.CENTER)
+        self.empty_text.add_css_class("dim-label")
+        buttons = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER, margin_top=12)
+        again = Gtk.Button(label="Scan again", action_name="win.scan")
+        again.add_css_class("suggested-action")
+        buttons.append(again)
+        buttons.append(Gtk.Button(label="Diagnose discovery…", action_name="win.doctor"))
+        for w in (icon, self.empty_title, self.empty_text, buttons):
+            page.append(w)
+        return page
 
-    @staticmethod
-    def _state_cell(_col, renderer, model, it, _data):
-        color = STATE_COLORS.get(model.get_value(it, STATE_COL))
-        if color:
-            renderer.set_property("foreground", color)
-        renderer.set_property("foreground-set", color is not None)
-
-    @staticmethod
-    def _setup_cell(_col, renderer, model, it, _data):
-        uninitialized = model.get_value(it, STATE_COL) == "Uninitialized"
-        renderer.set_property("icon-name", "web-browser-symbolic" if uninitialized else None)
-
-    def _view_clicked(self, _gesture, _n_press, x, y):
-        bx, by = self.view.convert_widget_to_bin_window_coords(int(x), int(y))
-        hit = self.view.get_path_at_pos(bx, by)
-        if not hit or hit[1] is not self.setup_col:
+    # -- cells -----------------------------------------------------------
+    def _setup_cell(self, _factory, item, prop):
+        label = Gtk.Label(xalign=0)
+        if prop in TABULAR:
+            label.add_css_class("tabular")
+        if prop != "state":
+            item.set_child(label)
             return
-        dev = self.devices[hit[0].get_indices()[0]]
-        if not dev.get("initialized"):
-            Gio.AppInfo.launch_default_for_uri(self._device_url(dev))
+        box = Gtk.Box(spacing=8)
+        dot = Gtk.Box(valign=Gtk.Align.CENTER)
+        dot.add_css_class("state-dot")
+        box.append(dot)
+        box.append(label)
+        box.dot, box.label = dot, label
+        item.set_child(box)
+
+    def _bind_cell(self, _factory, item, prop):
+        dev, widget = item.get_item(), item.get_child()
+        label = getattr(widget, "label", widget)
+        flags = GObject.BindingFlags.SYNC_CREATE
+        item.bindings = [dev.bind_property(prop, label, "label", flags)]
+        if prop == "online_text":
+            item.bindings.append(dev.bind_property("online_tip", label, "tooltip-text", flags))
+        item.handlers = [dev.connect("notify::online", lambda *_: self._style_cell(widget, dev))]
+        if prop == "state":
+            item.handlers.append(dev.connect("notify::state", lambda *_: self._style_cell(widget, dev)))
+        self._style_cell(widget, dev)
+        if prop == "name":
+            self._name_cells[item] = (dev, widget)
+
+    def _unbind_cell(self, _factory, item, prop):
+        dev = item.get_item()
+        for binding in item.bindings:
+            binding.unbind()
+        for handler in item.handlers:
+            dev.disconnect(handler)
+        item.bindings, item.handlers = [], []
+        if prop == "name":
+            self._name_cells.pop(item, None)
 
     @staticmethod
-    def _device_url(dev):
-        if not dev.get("initialized"):
-            return f"http://{dev['ip']}:{dev.get('port') or 8000}/"
-        https_only = str(dev.get("http_enabled", "")).lower() == "no"
-        port = dev.get("https_port") if https_only else dev.get("port")
-        scheme = "https" if https_only else "http"
-        return f"{scheme}://{dev['ip']}:{port}/"
+    def _style_cell(widget, dev):
+        label = getattr(widget, "label", widget)
+        if dev.online:
+            label.remove_css_class("dim-label")
+        else:
+            label.add_css_class("dim-label")
+        dot = getattr(widget, "dot", None)
+        if dot is not None:
+            for cls in STATE_CLASSES.values():
+                dot.remove_css_class(cls)
+            dot.add_css_class(STATE_CLASSES.get(dev.state, "offline"))
 
-    # -- actions ---------------------------------------------------------
+    @staticmethod
+    def _compare(a, b, prop):
+        # Offline devices always sink to the bottom.
+        if a.online != b.online:
+            return -1 if a.online else 1
+        if prop == "online_text":
+            # Ascending = shortest online first; offline ones by last seen.
+            ka = -(a.online_since or 0) if a.online else -(a.last_seen or 0)
+            kb = -(b.online_since or 0) if b.online else -(b.last_seen or 0)
+        elif prop == "port":
+            ka, kb = int(a.port or 0), int(b.port or 0)
+        else:
+            ka, kb = getattr(a, prop).lower(), getattr(b, prop).lower()
+        return (ka > kb) - (ka < kb)
+
+    # -- scanning --------------------------------------------------------
     def scan(self):
-        self.scan_btn.set_sensitive(False)
+        if self.scanning:
+            return
+        self.scanning = True
+        self.lookup_action("scan").set_enabled(False)
         self.spinner.start()
-        self.status.set_text("Scanning the local network…")
+        self.subtitle.set_text("Scanning the local network…")
 
         def worker():
             try:
                 out = subprocess.run(
-                    [ACC_BIN, "scan", "--json", "--timeout", "4"],
-                    capture_output=True, text=True, check=True,
+                    [ACC_BIN, "scan", "--json", "--all", "--timeout", str(SCAN_TIMEOUT)],
+                    capture_output=True, text=True, check=True, timeout=SCAN_TIMEOUT * 5,
                 ).stdout
-                devices = json.loads(out) or []
-                err = None
+                devices, err = json.loads(out) or [], None
+            except FileNotFoundError:
+                devices, err = [], (f"{ACC_BIN} was not found. Install the acc binary next to "
+                                    "acc-gui or on your PATH, or point ACC_BIN at it.")
+            except subprocess.CalledProcessError as exc:
+                devices, err = [], exc.stderr.strip() or f"acc exited with status {exc.returncode}"
             except Exception as exc:  # noqa: BLE001
                 devices, err = [], str(exc)
-            GLib.idle_add(self.scan_done, devices, err)
+            GLib.idle_add(self._scan_done, devices, err)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def scan_done(self, devices, err):
-        self.devices = devices
-        self.store.clear()
-        for dev in devices:
-            row = [str(dev.get(key, "") or "") for _, key in COLUMNS]
-            row[STATE_COL] = STATE_NAMES.get(row[STATE_COL], row[STATE_COL])
-            self.store.append(row)
-        if err:
-            self.status.set_text(f"Scan failed: {err}")
-        elif devices:
-            text = f"Found {len(devices)} device(s). Double-click a row to open ADM."
-            if any(not d.get("initialized") for d in devices):
-                text += " Click the browser icon on an uninitialized NAS to set it up."
-            self.status.set_text(text)
-        else:
-            self.status.set_text("No ASUSTOR NAS found on the local network. "
-                                 "Run 'acc doctor' in a terminal if you expected one.")
+    def _scan_done(self, devices, err):
+        self.scanning = False
         self.spinner.stop()
-        self.scan_btn.set_sensitive(True)
-        return False
+        self.lookup_action("scan").set_enabled(True)
+        self.last_error = err
+        if err:
+            self.set_status(f"Scan failed: {err}", sticky=True)
+        else:
+            self._apply(devices)
+            self.last_scan = time.time()
+        self._refresh_summary()
+        return GLib.SOURCE_REMOVE
 
+    def _apply(self, devices):
+        """Update the table in place so selection and scroll position stay."""
+        fresh = {Device.key_of(d): d for d in devices}
+        i = 0
+        while i < self.store.get_n_items():
+            dev = self.store.get_item(i)
+            data = fresh.pop(dev.key, None)
+            if data is None:
+                self.store.remove(i)
+            else:
+                dev.update(data)
+                i += 1
+        for data in fresh.values():
+            self.store.append(Device(data))
+        self.filter.changed(Gtk.FilterChange.DIFFERENT)
+        sorter = self.view.get_sorter()
+        if sorter is not None:
+            sorter.changed(Gtk.SorterChange.DIFFERENT)
+
+    def _auto_scan(self):
+        if self.auto_refresh and not self.scanning:
+            self.scan()
+        return GLib.SOURCE_CONTINUE
+
+    def _tick(self):
+        for i in range(self.store.get_n_items()):
+            self.store.get_item(i).tick()
+        return GLib.SOURCE_CONTINUE
+
+    def _devices(self):
+        return [self.store.get_item(i) for i in range(self.store.get_n_items())]
+
+    def _refresh_summary(self):
+        devices = self._devices()
+        online = sum(1 for d in devices if d.online)
+        offline = len(devices) - online
+        parts = []
+        if online:
+            parts.append(f"{online} online")
+        if offline:
+            parts.append(f"{offline} offline")
+        summary = " · ".join(parts) if parts else "No devices"
+        if self.last_scan:
+            summary += " · scanned " + time.strftime("%H:%M:%S", time.localtime(self.last_scan))
+        self.subtitle.set_text(summary)
+
+        if self.sorted.get_n_items():
+            self.stack.set_visible_child_name("list")
+        else:
+            if self.last_error:
+                self.empty_title.set_text("Scan failed")
+                self.empty_text.set_text(self.last_error)
+            elif offline and not self.show_offline:
+                self.empty_title.set_text("No ASUSTOR NAS is answering")
+                self.empty_text.set_text(f"{offline} remembered device(s) are hidden. "
+                                         "Enable “Show offline devices” in the menu to wake one.")
+            else:
+                self.empty_title.set_text("No ASUSTOR NAS found")
+                self.empty_text.set_text(
+                    "Make sure the NAS is powered on and on the same network as this "
+                    "computer, then scan again. If it still does not appear, the "
+                    "diagnosis tells whether a firewall is blocking mDNS.")
+            self.stack.set_visible_child_name("empty")
+        self._selection_changed()
+        if self._status_timer is None and not self.last_error:
+            self._set_hint()
+
+    def _got_version(self, out, _err):
+        self.acc_version = out.strip().removeprefix("acc ").strip()
+
+    # -- selection and actions -------------------------------------------
     def selected(self):
-        model, it = self.view.get_selection().get_selected()
-        if it is None:
-            self.status.set_text("Select a NAS first.")
-            return None
-        return self.devices[model.get_path(it).get_indices()[0]]
+        return self.selection.get_selected_item()
+
+    def _selection_changed(self):
+        dev = self.selected()
+        self.lookup_action("open").set_enabled(dev is not None and dev.online and bool(dev.url))
+        self.lookup_action("wake").set_enabled(dev is not None and bool(dev.mac))
+        self.lookup_action("copy-ip").set_enabled(dev is not None and bool(dev.ip))
+        self.lookup_action("copy-mac").set_enabled(dev is not None and bool(dev.mac))
+        self.lookup_action("forget").set_enabled(dev is not None and not dev.online)
+        self.lookup_action("forget-offline").set_enabled(any(not d.online for d in self._devices()))
+        setup = dev is not None and not dev.initialized
+        self.open_btn.set_label("Set up NAS" if setup else "Open ADM")
+        self.open_btn.set_tooltip_text(
+            "Open the setup wizard of the selected NAS (Ctrl+O)" if setup else
+            "Open the web interface of the selected NAS (Ctrl+O)")
+
+    def _device_at(self, y):
+        """The device of the row at window y, from the bound Name cells."""
+        for dev, widget in self._name_cells.values():
+            ok, bounds = widget.compute_bounds(self.view)
+            if ok and bounds.get_y() <= y < bounds.get_y() + bounds.get_height():
+                return dev
+        return None
+
+    def _row_right_click(self, _gesture, _n_press, x, y):
+        dev = self._device_at(y)
+        if dev is not None:
+            for i in range(self.sorted.get_n_items()):
+                if self.sorted.get_item(i).key == dev.key:
+                    self.selection.set_selected(i)
+                    break
+        if self.selected() is None:
+            return
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
+        self.row_menu.set_pointing_to(rect)
+        self.row_menu.popup()
+
+    def _open(self, dev):
+        if dev is None:
+            return
+        if not dev.online:
+            self.set_status(f"{dev.name} is not answering; wake it first.")
+            return
+        if not dev.url:
+            self.set_status(f"{dev.name} did not report an address.")
+            return
+        Gio.AppInfo.launch_default_for_uri(dev.url, None)
 
     def open_selected(self):
+        self._open(self.selected())
+
+    def wake_selected(self):
         dev = self.selected()
-        if dev:
-            Gio.AppInfo.launch_default_for_uri(self._device_url(dev))
+        if dev is None:
+            return
+        if not dev.mac:
+            self.set_status(f"{dev.name} did not report a MAC address.")
+            return
+        self.set_status(f"Waking {dev.name}…")
+        self._run_acc(["wol", dev.mac], lambda out, err: self.set_status(out or err))
 
-    def wol_selected(self):
+    def forget_selected(self):
         dev = self.selected()
-        if not dev:
+        if dev is not None:
+            self._forget([dev])
+
+    def forget_offline(self):
+        self._forget([d for d in self._devices() if not d.online])
+
+    def _forget(self, devices):
+        if not devices:
             return
-        mac = dev.get("mac")
-        if not mac:
-            self.status.set_text(f"{dev['name']} did not report a MAC address.")
+
+        def worker():
+            failed = []
+            for dev in devices:
+                res = subprocess.run([ACC_BIN, "forget", dev.mac or dev.name],
+                                     capture_output=True, text=True)
+                if res.returncode != 0:
+                    failed.append(res.stderr.strip() or dev.name)
+            GLib.idle_add(done, failed)
+
+        def done(failed):
+            keys = {d.key for d in devices}
+            i = 0
+            while i < self.store.get_n_items():
+                if self.store.get_item(i).key in keys:
+                    self.store.remove(i)
+                else:
+                    i += 1
+            if failed:
+                self.set_status("Could not forget: " + "; ".join(failed))
+            else:
+                self.set_status(f"Forgot {len(devices)} device(s).")
+            self._refresh_summary()
+            return GLib.SOURCE_REMOVE
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _copy(self, prop):
+        dev = self.selected()
+        if dev is None:
             return
-        res = subprocess.run([ACC_BIN, "wol", mac], capture_output=True, text=True)
-        self.status.set_text(res.stdout.strip() or res.stderr.strip())
+        value = getattr(dev, prop)
+        provider = Gdk.ContentProvider.new_for_bytes(
+            "text/plain;charset=utf-8", GLib.Bytes.new(value.encode()))
+        self.get_clipboard().set_content(provider)
+        self.set_status(f"Copied {value}")
+
+    def run_doctor(self):
+        win = Gtk.Window(transient_for=self, title="Discovery diagnosis",
+                         default_width=760, default_height=520)
+        win.set_titlebar(Gtk.HeaderBar())
+        text = Gtk.TextView(editable=False, monospace=True, cursor_visible=False,
+                            left_margin=12, right_margin=12, top_margin=12, bottom_margin=12)
+        text.get_buffer().set_text("Running acc doctor, this takes a few seconds…\n")
+        win.set_child(Gtk.ScrolledWindow(child=text))
+        escape = Gtk.ShortcutController()
+        escape.add_shortcut(Gtk.Shortcut.new(
+            Gtk.ShortcutTrigger.parse_string("Escape"),
+            Gtk.CallbackAction.new(lambda *_: win.close() or True)))
+        win.add_controller(escape)
+        win.present()
+        self._run_acc(["doctor"], lambda out, err: text.get_buffer().set_text(out + err))
+
+    def show_about(self):
+        about = Gtk.AboutDialog(
+            transient_for=self, modal=True,
+            program_name="Asustor ACC for Linux",
+            version=self.acc_version,
+            comments="Unofficial Linux version of the ASUSTOR Control Center: "
+                     "NAS discovery, ADM launcher and Wake-on-LAN.",
+            website=WEBSITE,
+            license_type=Gtk.License.MIT_X11,
+        )
+        # Installed: the themed icon. Run from a source checkout: the PNG.
+        if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(APP_ID):
+            about.set_logo_icon_name(APP_ID)
+        else:
+            png = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "assets", "icon-256.png")
+            if os.path.exists(png):
+                about.set_logo(Gdk.Texture.new_from_filename(png))
+        about.present()
+
+    # -- helpers ---------------------------------------------------------
+    def _run_acc(self, args, done):
+        """Run acc in the background; done(stdout, stderr) runs on the UI thread."""
+        def worker():
+            try:
+                res = subprocess.run([ACC_BIN, *args], capture_output=True, text=True, timeout=60)
+                out, err = res.stdout.strip(), res.stderr.strip()
+            except Exception as exc:  # noqa: BLE001
+                out, err = "", str(exc)
+            GLib.idle_add(lambda: done(out, err) and False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_hint(self):
+        if self.store.get_n_items():
+            self.status.set_text("Double-click a NAS to open ADM. Right-click for more.")
+        else:
+            self.status.set_text("Press Scan to search for ASUSTOR NAS devices.")
+        self._status_timer = None
+        return GLib.SOURCE_REMOVE
+
+    def set_status(self, text, sticky=False):
+        self.status.set_text(text)
+        if self._status_timer:
+            GLib.source_remove(self._status_timer)
+            self._status_timer = None
+        if not sticky:
+            self._status_timer = GLib.timeout_add_seconds(8, self._set_hint)
 
 
-class AccApp(Gtk.Application):
+AppBase = Adw.Application if Adw else Gtk.Application
+
+
+class AccApp(AppBase):
     def __init__(self):
         super().__init__(application_id=APP_ID)
+
+    def do_startup(self):
+        AppBase.do_startup(self)
+        css = Gtk.CssProvider()
+        if hasattr(css, "load_from_string"):
+            css.load_from_string(CSS)
+        else:
+            css.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        quit_action = Gio.SimpleAction.new("quit", None)
+        quit_action.connect("activate", lambda *_: self.quit())
+        self.add_action(quit_action)
+        self.set_accels_for_action("app.quit", ["<Control>q"])
+        self.set_accels_for_action("win.scan", ["F5", "<Control>r"])
+        self.set_accels_for_action("win.open", ["<Control>o"])
 
     def do_activate(self):
         win = self.get_active_window() or AccWindow(self)

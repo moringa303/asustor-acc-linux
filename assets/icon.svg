@@ -1,19 +1,37 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <!-- Asustor ACC for Linux app icon (MIT, original work, not derived from
-       ASUSTOR artwork): neon line art of a rackmount server, three units
-       with drive slots and status LEDs. -->
+       ASUSTOR artwork): a four-bay NAS tower announcing itself on the
+       network, which is exactly what the app listens for. -->
   <defs>
-    <linearGradient id="neon" gradientUnits="userSpaceOnUse"
-                    x1="96" y1="128" x2="416" y2="400">
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c2b47"/>
+      <stop offset="1" stop-color="#070b14"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.28" cy="0.18" r="0.75">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="neon" gradientUnits="userSpaceOnUse" x1="330" y1="120" x2="450" y2="400">
       <stop offset="0" stop-color="#22d9ff"/>
       <stop offset="1" stop-color="#3bffa0"/>
     </linearGradient>
-    <radialGradient id="bg" cx="0.5" cy="0.38" r="0.95">
-      <stop offset="0" stop-color="#0d151f"/>
-      <stop offset="1" stop-color="#04060a"/>
-    </radialGradient>
-    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="5" result="b"/>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#46587a"/>
+      <stop offset="1" stop-color="#1e2838"/>
+    </linearGradient>
+    <linearGradient id="tray" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34455f"/>
+      <stop offset="1" stop-color="#222d40"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="led" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
       <feMerge>
         <feMergeNode in="b"/>
         <feMergeNode in="SourceGraphic"/>
@@ -22,23 +40,37 @@
   </defs>
 
   <rect x="8" y="8" width="496" height="496" rx="112" fill="url(#bg)"/>
+  <rect x="8" y="8" width="496" height="496" rx="112" fill="url(#sheen)"/>
 
-  <g filter="url(#soft)">
-    <!-- three rack units -->
-    <g fill="none" stroke="url(#neon)" stroke-width="16" stroke-linecap="round">
-      <rect x="96" y="128" width="320" height="72" rx="16"/>
-      <rect x="96" y="222" width="320" height="72" rx="16"/>
-      <rect x="96" y="316" width="320" height="72" rx="16"/>
-    </g>
-    <!-- drive slots -->
-    <g fill="none" stroke="url(#neon)" stroke-width="12" stroke-linecap="round">
-      <line x1="132" y1="166" x2="268" y2="166"/>
-      <line x1="132" y1="258" x2="268" y2="258"/>
-      <line x1="132" y1="352" x2="268" y2="352"/>
-    </g>
-    <!-- status LEDs: top unit active -->
-    <circle cx="372" cy="166" r="12" fill="#3bffa0"/>
-    <circle cx="372" cy="258" r="12" fill="#17475c"/>
-    <circle cx="372" cy="352" r="12" fill="#17475c"/>
+  <!-- NAS tower -->
+  <rect x="72" y="120" width="208" height="272" rx="28" fill="url(#body)"
+        stroke="#ffffff" stroke-opacity="0.22" stroke-width="2"/>
+  <rect x="92" y="140" width="168" height="232" rx="14" fill="#0c121c"/>
+  <g>
+    <rect x="104" y="152" width="144" height="44" rx="8" fill="url(#tray)"/>
+    <rect x="104" y="206" width="144" height="44" rx="8" fill="url(#tray)"/>
+    <rect x="104" y="260" width="144" height="44" rx="8" fill="url(#tray)"/>
+    <rect x="104" y="314" width="144" height="44" rx="8" fill="url(#tray)"/>
+  </g>
+  <!-- tray handles -->
+  <g fill="#52668a">
+    <rect x="216" y="162" width="22" height="24" rx="5"/>
+    <rect x="216" y="216" width="22" height="24" rx="5"/>
+    <rect x="216" y="270" width="22" height="24" rx="5"/>
+    <rect x="216" y="324" width="22" height="24" rx="5"/>
+  </g>
+  <!-- drive LEDs -->
+  <g filter="url(#led)">
+    <circle cx="124" cy="174" r="6.5" fill="#3bffa0"/>
+    <circle cx="124" cy="228" r="6.5" fill="#3bffa0"/>
+    <circle cx="124" cy="282" r="6.5" fill="#22d9ff"/>
+    <circle cx="124" cy="336" r="6.5" fill="#3bffa0"/>
+  </g>
+
+  <!-- announcement: three waves leaving the NAS -->
+  <g fill="none" stroke="url(#neon)" stroke-width="24" stroke-linecap="round" filter="url(#glow)">
+    <path d="M 336 213 A 56 56 0 0 1 336 299"/>
+    <path d="M 367 176 A 104 104 0 0 1 367 336"/>
+    <path d="M 398 140 A 152 152 0 0 1 398 372"/>
   </g>
 </svg>
