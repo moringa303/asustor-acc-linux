@@ -33,6 +33,8 @@ func doctor(timeout time.Duration) {
 			note = "down, skipped"
 		case ifc.Flags&net.FlagLoopback != 0:
 			note = "loopback, skipped"
+		case ifaceName != "" && ifc.Name != ifaceName:
+			note = "not selected with --iface, skipped"
 		case ifc.Flags&net.FlagMulticast == 0:
 			note = "no multicast, skipped"
 		case !hasIPv4(ifc):
@@ -44,6 +46,10 @@ func doctor(timeout time.Duration) {
 		fmt.Printf("  %-14s %s (%s)\n", ifc.Name, note, addrSummary(ifc))
 	}
 	if len(candidates) == 0 {
+		if ifaceName != "" {
+			fmt.Printf("\nRESULT: interface %s is not usable for mDNS (see above).\n", ifaceName)
+			return
+		}
 		fmt.Println("\nRESULT: no usable multicast interface. Connect to the LAN first.")
 		return
 	}
@@ -122,8 +128,8 @@ func doctor(timeout time.Duration) {
 	case asustorSeen:
 		fmt.Println("RESULT: an ASUSTOR NAS IS answering on this network, so 'acc scan'")
 		fmt.Println("should work. If it does not, avahi-daemon may be swallowing unicast")
-		fmt.Println("replies; install avahi ('sudo pacman -S avahi' / enable avahi-daemon)")
-		fmt.Println("and acc uses it automatically. Or rerun scan with --verbose.")
+		fmt.Println("replies; install avahi-utils ('sudo pacman -S avahi' / 'sudo apt install")
+		fmt.Println("avahi-utils') and acc also asks the daemon. Or rerun scan with --verbose.")
 	case packets > 0:
 		fmt.Println("RESULT: mDNS reception works (other devices answered), but no ASUSTOR")
 		fmt.Println("NAS responded. Check that:")
@@ -194,7 +200,7 @@ func mdnsQuery(name string) []byte {
 		b.WriteByte(byte(len(label)))
 		b.WriteString(label)
 	}
-	b.WriteByte(0)                  // root
-	b.Write([]byte{0, 12, 0, 1})    // QTYPE=PTR, QCLASS=IN
+	b.WriteByte(0)               // root
+	b.Write([]byte{0, 12, 0, 1}) // QTYPE=PTR, QCLASS=IN
 	return b.Bytes()
 }
