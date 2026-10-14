@@ -47,12 +47,14 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   ```
 
 - `acc-gui`: GTK4 front-end with the familiar device table
-  (Name / IP / Model / Serial / MAC / ADM / Port / State / Uptime), Scan,
+  (Model / Name / IP / Serial / MAC / ADM / Port / State / Uptime), each
+  model with a small glyph of its form factor (tower, rack, flash), Scan,
   Open ADM and Wake buttons, a right-click menu (open shared folders,
   copy the IP or MAC, forget a device), sortable columns, and automatic
-  refresh every 30 seconds. The layout adapts to the window: a table
-  when it is wide enough for every column, a card list otherwise, never
-  a horizontal scrollbar or clipped text. Offline devices stay in the
+  refresh every 30 seconds. The table is the layout from 1000 px of
+  window width up (cells shorten with an ellipsis and show the full text
+  as a tooltip, never a horizontal scrollbar); narrower windows get a
+  card list. Offline devices stay in the
   list, dimmed, so you can wake them.
 
 - Uptime: read from the NAS via SNMP, shown in the CLI's UPTIME column
