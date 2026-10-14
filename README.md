@@ -49,9 +49,9 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
 - `acc-gui`: GTK4 front-end with the familiar device table
   (Model / Name / IP / Serial / MAC / ADM / Port / State), each model
   with a small glyph of its form factor (tower, rack, flash), Scan, Ping,
-  Open ADM and Wake buttons, two link buttons that open the selected
-  model's specifications and its HDD compatibility list (SSD list for
-  the all-flash FS models) on asustor.com, a right-click menu (open shared folders,
+  Open ADM and Wake buttons, a link button that opens the selected
+  model's HDD compatibility list (SSD list for the all-flash FS models)
+  on asustor.com, a right-click menu (open shared folders,
   copy the IP or MAC, forget a device), sortable columns, and automatic
   refresh every 30 seconds. The table is the layout from 1000 px of
   window width up (cells shorten with an ellipsis and show the full text
@@ -219,22 +219,22 @@ the SMB backend of your desktop (`gvfs-smb` on GNOME, Cinnamon and XFCE,
 
 ## Links to asustor.com
 
-The two link buttons (and the matching entries of the right-click menu)
-open the selected model's specifications and its compatibility list.
-Without an exact address scheme they go through DuckDuckGo's
-"I'm feeling ducky" redirect to the first asustor.com hit for the model.
-To use exact addresses instead, create `~/.config/asustor-acc/links.json`:
+The link button (and the matching entry of the right-click menu) opens
+the selected model's compatibility list: HDD for AS models, SSD for the
+all-flash FS models. Without an exact address scheme it goes through
+DuckDuckGo's "I'm feeling ducky" redirect to the first asustor.com hit
+for the model. To use an exact address instead, create
+`~/.config/asustor-acc/links.json`:
 
 ```json
 {
-  "spec":   "https://www.asustor.com/en/product?p_id={model}",
   "compat": "https://www.asustor.com/en/compatibility?model={model}&type={media}",
-  "models": {"AS6704T": {"spec": "https://...", "compat": "https://..."}}
+  "models": {"AS6704T": {"compat": "https://..."}}
 }
 ```
 
 `{model}` is the model number, `{media}` is `HDD` or `SSD`; entries under
-`models` override the templates for one model.
+`models` override the template for one model.
 
 ## Troubleshooting: "No devices found"
 
