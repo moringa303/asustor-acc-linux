@@ -1,33 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <!-- Asustor ACC for Linux app icon (MIT, original work, not derived from
-       ASUSTOR artwork): a three-bay NAS tower in thin line art announcing
-       itself on the network, which is exactly what the app listens for. -->
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#141b2e"/>
-      <stop offset="1" stop-color="#0b1020"/>
-    </linearGradient>
-  </defs>
+       ASUSTOR artwork): a storage stack (three platters) in thin line art
+       on dark grey. -->
+  <rect x="8" y="8" width="496" height="496" rx="112" fill="#202124"
+        stroke="#ffffff" stroke-opacity="0.1" stroke-width="4"/>
 
-  <rect x="8" y="8" width="496" height="496" rx="112" fill="url(#bg)"/>
-
-  <!-- NAS tower: outlines only (body, front bezel, three drive bays) -->
   <g fill="none" stroke="#e6ecf5" stroke-width="16" stroke-linejoin="round" stroke-linecap="round">
-    <rect x="88" y="120" width="168" height="272" rx="24"/>
-    <rect x="120" y="152" width="104" height="208" rx="12"/>
-    <path d="M 146 202 H 170 M 146 256 H 170 M 146 310 H 170"/>
+    <!-- top platter -->
+    <ellipse cx="256" cy="168" rx="120" ry="40"/>
+    <!-- sides -->
+    <path d="M 136 168 V 344 M 376 168 V 344"/>
+    <!-- visible front curve of the middle and bottom platters -->
+    <path d="M 136 256 A 120 40 0 0 0 376 256"/>
+    <path d="M 136 344 A 120 40 0 0 0 376 344"/>
   </g>
-  <!-- drive LEDs -->
-  <g fill="#22d3ee">
-    <circle cx="198" cy="202" r="8"/>
-    <circle cx="198" cy="256" r="8"/>
-    <circle cx="198" cy="310" r="8"/>
-  </g>
-
-  <!-- announcement: three signal arcs centred at (272,256), -50 to +50 deg -->
-  <g fill="none" stroke="#22d3ee" stroke-width="16" stroke-linecap="round">
-    <path d="M 308 213.1 A 56 56 0 0 1 308 298.9"/>
-    <path d="M 338.9 176.3 A 104 104 0 0 1 338.9 335.7"/>
-    <path d="M 369.7 139.6 A 152 152 0 0 1 369.7 372.4"/>
-  </g>
+  <!-- activity LED on the bottom platter -->
+  <circle cx="340" cy="312" r="9" fill="#22d3ee"/>
 </svg>
