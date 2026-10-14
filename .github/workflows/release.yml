@@ -59,6 +59,16 @@ jobs:
            Unofficial Linux version of ASUSTOR Control Center: mDNS discovery, ADM web UI
            launcher, Wake-on-LAN. CLI (acc) plus GTK4 GUI (acc-gui).
           EOF
+          cat > deb/DEBIAN/postinst <<'EOF'
+          #!/bin/sh
+          # An older copy in /usr/local/bin (from a tarball or source install)
+          # would be started instead of this package's /usr/bin/acc-gui.
+          for f in /usr/local/bin/acc /usr/local/bin/acc-gui; do
+            [ -e "$f" ] && echo "WARNING: $f exists and shadows /usr/bin/$(basename "$f"); remove it: sudo rm $f" >&2
+          done
+          exit 0
+          EOF
+          chmod 755 deb/DEBIAN/postinst
           dpkg-deb --build --root-owner-group deb "asustor-acc-linux_${VERSION}_amd64.deb"
       - name: Build .rpm
         run: |
@@ -77,6 +87,11 @@ jobs:
           launcher, Wake-on-LAN. CLI (acc) plus GTK4 GUI (acc-gui).
           %install
           cp -r ${PWD}/stage/* %{buildroot}/
+          %post
+          for f in /usr/local/bin/acc /usr/local/bin/acc-gui; do
+            [ -e "$f" ] && echo "WARNING: $f exists and shadows /usr/bin/$(basename "$f"); remove it: sudo rm $f" >&2
+          done
+          exit 0
           %files
           /usr/bin/acc
           /usr/bin/acc-gui
