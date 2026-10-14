@@ -53,8 +53,12 @@ GUI_VERSION = "dev"
 APP_ID = "io.github.moringa303.AsustorAcc"
 WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
 
-SCAN_TIMEOUT = 4  # seconds acc listens for answers
+SCAN_TIMEOUT = 6  # seconds acc listens for answers
 REFRESH_SECONDS = int(os.environ.get("ACC_GUI_REFRESH", "30"))
+# A NAS that answered recently stays online in the list until it has been
+# missing from scans for this long. On a busy segment single mDNS answers
+# get lost; without the grace a NAS would blink offline and back.
+PRESENCE_GRACE = 150
 
 # Layout. The device list is the familiar table whenever the window is
 # at least TABLE_WIDTH wide; the cells ellipsize (the full text is in the
@@ -86,8 +90,8 @@ COLUMNS = [
 ]
 TABULAR = {"ip", "serial", "mac", "adm", "port"}
 # Fixed widths (px) for the columns that may shorten with an ellipsis
-# when the window is narrow; Model and State keep their natural width,
-# Name takes the rest. Tooltips carry the full text.
+# when the window is narrow; Model and State are always shown whole, Name
+# takes the rest. Tooltips carry the full text.
 FIXED_WIDTHS = {"ip": 150, "serial": 150, "mac": 150, "adm": 100, "port": 56}
 
 STATE_CLASSES = {
@@ -281,9 +285,12 @@ class Device(GObject.Object):
     def __init__(self, data):
         super().__init__()
         self.data = {}
+        self.answered = False  # did the NAS answer the last scan
+        self.known_state = ""  # its state when it last answered
         self.uptime = None  # seconds the NAS reported, as of last_seen
         self.last_seen = None
         self.seen_tip = ""
+        self.text = ""  # every field in one lower-case string, for the search
         self.update(data)
 
     @staticmethod
@@ -315,23 +322,46 @@ class Device(GObject.Object):
         self.mac = data.get("mac") or ""
         self.adm = data.get("adm_version") or ""
         self.port = str(data.get("port") or "")
-        self.online = bool(data.get("online"))
-        self.state = (data.get("state") or "") if self.online else "Offline"
-        uptime = data.get("uptime_seconds")
-        self.uptime = int(uptime) if self.online and isinstance(uptime, (int, float)) else None
+        self.answered = bool(data.get("online"))
+        # acc remembers the state a NAS had when it last answered.
+        self.known_state = data.get("state") or self.known_state or "Ready"
         self.last_seen = _parse_time(data.get("last_seen"))
+        uptime = data.get("uptime_seconds")
+        self.uptime = int(uptime) if self.answered and isinstance(uptime, (int, float)) else None
+        self.ids = " · ".join(p for p in (self.mac, self.serial) if p)
+        self._set_online(self.answered or self.in_grace())
+
+    def in_grace(self):
+        """Missing from the last scan, but seen recently enough to still
+        count as online: one lost mDNS answer must not flip a NAS offline."""
+        return (not self.answered and self.last_seen is not None
+                and 0 <= time.time() - self.last_seen < PRESENCE_GRACE)
+
+    def _set_online(self, online):
+        """Derive everything that depends on whether the NAS counts as
+        online: the state, the card lines, the tooltips, the search text."""
+        self.online = online
+        self.state = self.known_state if online else "Offline"
         state = self.state
         self.seen_tip = ""
-        if not self.online and self.last_seen:
-            state = f"Offline, last seen {format_seen(self.last_seen)}"
+        if self.last_seen and not self.answered:
             seen = datetime.fromtimestamp(self.last_seen).strftime("%-d %b %Y %H:%M:%S")
-            self.seen_tip = f"Last answered a scan on {seen}"
+            if online:
+                self.seen_tip = f"Did not answer the last scan; last answered on {seen}"
+            else:
+                state = f"Offline, last seen {format_seen(self.last_seen)}"
+                self.seen_tip = f"Last answered a scan on {seen}"
         parts = [state, self.ip,
                  f"ADM {self.adm}" if self.adm else "",
                  f"port {self.port}" if self.port else ""]
         self.details = " · ".join(p for p in parts if p)
-        self.ids = " · ".join(p for p in (self.mac, self.serial) if p)
-        self.tick()
+        self.text = " ".join((self.name, self.ip, self.model, self.serial, self.mac,
+                              self.adm, self.port, self.state)).lower()
+        self._tip()
+
+    def matches(self, query):
+        """True when every word of query occurs somewhere in the device."""
+        return all(word in self.text for word in query.lower().split())
 
     def uptime_now(self):
         """Seconds the NAS has been up right now, or None if it did not say."""
@@ -341,7 +371,15 @@ class Device(GObject.Object):
         return self.uptime + max(0, elapsed)
 
     def tick(self):
-        """Refresh the State tooltip for the current time."""
+        """Once a second: let the grace period run out and keep the State
+        tooltip current. True when the NAS has just gone offline."""
+        if self.online and not self.answered and not self.in_grace():
+            self._set_online(False)
+            return True
+        self._tip()
+        return False
+
+    def _tip(self):
         up = self.uptime_now()
         if up is not None:
             tip = f"Up {format_uptime(up)} (reported by the NAS over SNMP)"
@@ -409,7 +447,10 @@ class AccWindow(Gtk.ApplicationWindow):
         self.summary = ""
         self.view_name = "table"
         self.compact = False
+        self.query = ""  # the search text; "" shows everything
         self._header_width = 0  # widest the full header bar measured so far
+        self._table_width = 0  # widest the table measured so far
+        self._state_px = None  # width of the widest State text
         self._status_timer = None
         self._rows = {}  # view -> {list item: (device, row widget)}
 
@@ -427,6 +468,7 @@ class AccWindow(Gtk.ApplicationWindow):
     def _build_actions(self):
         plain = [
             ("scan", self.scan),
+            ("search", self.start_search),
             ("open", self.open_selected),
             ("shares", self.open_shares),
             ("wake", self.wake_selected),
@@ -471,6 +513,9 @@ class AccWindow(Gtk.ApplicationWindow):
         header.pack_start(scan_btn)
         self.spinner = Gtk.Spinner()
         header.pack_start(self.spinner)
+        self.search_btn = Gtk.ToggleButton(icon_name="edit-find-symbolic")
+        self.search_btn.set_tooltip_text("Search the list (Ctrl+F, or just start typing)")
+        header.pack_start(self.search_btn)
 
         self.titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
         title = Gtk.Label(label="Asustor ACC")
@@ -547,7 +592,7 @@ class AccWindow(Gtk.ApplicationWindow):
     def _build_views(self):
         """The table and the card list: two views of one selection."""
         self.store = Gio.ListStore.new(Device)
-        self.filter = Gtk.CustomFilter.new(lambda dev, *_: self.show_offline or dev.online)
+        self.filter = Gtk.CustomFilter.new(self._shown)
         filtered = Gtk.FilterListModel.new(self.store, self.filter)
         self.sorted = Gtk.SortListModel.new(filtered, None)
         self.selection = Gtk.SingleSelection.new(self.sorted)
@@ -624,7 +669,21 @@ class AccWindow(Gtk.ApplicationWindow):
         self.status.add_css_class("dim-label")
         self.status.add_css_class("statusbar")
 
+        # The search bar sits above the list; typing anywhere in the window
+        # opens it, Escape closes it and shows everything again.
+        self.search_entry = Gtk.SearchEntry(hexpand=True, max_width_chars=60,
+                                            placeholder_text="Name, IP, model, serial, MAC…")
+        self.search_entry.connect("search-changed", self._search_changed)
+        self.search_bar = Gtk.SearchBar(child=self.search_entry, show_close_button=True)
+        self.search_bar.connect_entry(self.search_entry)
+        self.search_bar.set_key_capture_widget(self)
+        self.search_bar.connect("notify::search-mode-enabled", self._search_mode)
+        self.search_bar.bind_property("search-mode-enabled", self.search_btn, "active",
+                                      GObject.BindingFlags.BIDIRECTIONAL
+                                      | GObject.BindingFlags.SYNC_CREATE)
+
         box = ContentBox(self._classify_layout, self._apply_layout)
+        box.append(self.search_bar)
         box.append(self.stack)
         box.append(Gtk.Separator())
         box.append(self.status)
@@ -660,7 +719,12 @@ class AccWindow(Gtk.ApplicationWindow):
         if not self.compact:
             minimum = self.header.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
             self._header_width = max(self._header_width, minimum + LAYOUT_SLACK)
-        return ("table" if width >= TABLE_WIDTH else "cards",
+        # The table's own minimum (long model names, a large font) can be
+        # more than TABLE_WIDTH; measured, so its last column is never cut
+        # off but the cards take over instead.
+        minimum = self.view.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+        self._table_width = max(self._table_width, minimum + LAYOUT_SLACK)
+        return ("table" if width >= max(TABLE_WIDTH, self._table_width) else "cards",
                 width < max(COMPACT_WIDTH, self._header_width))
 
     def _apply_layout(self, layout):
@@ -682,12 +746,14 @@ class AccWindow(Gtk.ApplicationWindow):
     # -- table cells -----------------------------------------------------
     def _setup_cell(self, _factory, item, prop):
         # Cells ellipsize so the table fits any width from TABLE_WIDTH up;
-        # the tooltip carries the full text. The model is always shown whole.
-        ellipsize = Pango.EllipsizeMode.NONE if prop == "model" else Pango.EllipsizeMode.END
-        label = Gtk.Label(xalign=0, ellipsize=ellipsize)
+        # the tooltip carries the full text. Model and State are always
+        # shown whole (the table gives way to the cards instead).
+        whole = prop in ("model", "state")
+        label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.NONE if whole
+                          else Pango.EllipsizeMode.END)
         if prop in TABULAR:
             label.add_css_class("tabular")
-        if prop not in ("state", "model"):
+        if not whole:
             item.set_child(label)
             return
         box = Gtk.Box(spacing=8)
@@ -698,9 +764,19 @@ class AccWindow(Gtk.ApplicationWindow):
             box.dot = Gtk.Box(valign=Gtk.Align.CENTER)
             box.dot.add_css_class("state-dot")
             box.append(box.dot)
+            # As wide as the widest state, so the column does not change
+            # width with the states that happen to be on screen.
+            label.set_size_request(self._state_width(), -1)
         box.append(label)
         box.label = label
         item.set_child(box)
+
+    def _state_width(self):
+        """Pixel width of the widest state text in the table's font."""
+        if self._state_px is None:
+            self._state_px = max(self.view.create_pango_layout(s).get_pixel_size()[0]
+                                 for s in STATE_CLASSES)
+        return self._state_px
 
     def _bind_cell(self, _factory, item, prop):
         dev, widget = item.get_item(), item.get_child()
@@ -865,8 +941,16 @@ class AccWindow(Gtk.ApplicationWindow):
         return GLib.SOURCE_CONTINUE
 
     def _tick(self):
+        changed = False
         for i in range(self.store.get_n_items()):
-            self.store.get_item(i).tick()
+            changed = self.store.get_item(i).tick() or changed
+        if changed:
+            # A grace period ran out: re-filter, re-sort and recount.
+            self.filter.changed(Gtk.FilterChange.DIFFERENT)
+            sorter = self.view.get_sorter()
+            if sorter is not None:
+                sorter.changed(Gtk.SorterChange.DIFFERENT)
+            self._refresh_summary()
         return GLib.SOURCE_CONTINUE
 
     def _devices(self):
@@ -876,22 +960,29 @@ class AccWindow(Gtk.ApplicationWindow):
         devices = self._devices()
         online = sum(1 for d in devices if d.online)
         offline = len(devices) - online
+        shown = self.sorted.get_n_items()
         parts = []
-        if online:
+        if self.query:
+            parts.append(f"{shown} of {len(devices)} match")
+        if online and not self.query:
             parts.append(f"{online} online")
-        if offline:
+        if offline and not self.query:
             parts.append(f"{offline} offline")
         summary = " · ".join(parts) if parts else "No devices"
         if self.last_scan:
             summary += " · scanned " + time.strftime("%H:%M:%S", time.localtime(self.last_scan))
         self._show_summary(summary)
 
-        if self.sorted.get_n_items():
+        if shown:
             self.stack.set_visible_child_name(self.view_name)
         else:
             if self.last_error:
                 self.empty_title.set_text("Scan failed")
                 self.empty_text.set_text(self.last_error)
+            elif self.query:
+                self.empty_title.set_text("No matching device")
+                self.empty_text.set_text(f"None of the {len(devices)} devices matches "
+                                         f"“{self.query}”. Press Escape to show all.")
             elif offline and not self.show_offline:
                 self.empty_title.set_text("No ASUSTOR NAS is answering")
                 self.empty_text.set_text(f"{offline} remembered device(s) are hidden. "
@@ -919,6 +1010,30 @@ class AccWindow(Gtk.ApplicationWindow):
             self.set_status(f"acc {self.acc_version} at {ACC_PATH} does not match acc-gui "
                             f"{GUI_VERSION}: an older copy is being used. Remove it or "
                             "reinstall; 'which -a acc acc-gui' lists every copy.", sticky=True)
+
+    # -- search ----------------------------------------------------------
+    def _shown(self, dev, *_):
+        """The list filter: offline devices on request, the search's matches."""
+        return (self.show_offline or dev.online) and (not self.query or dev.matches(self.query))
+
+    def start_search(self):
+        self.search_bar.set_search_mode(True)
+        self.search_entry.grab_focus()
+
+    def _search_mode(self, bar, _pspec):
+        if bar.get_search_mode():
+            self.search_entry.grab_focus()
+        else:
+            self.search_entry.set_text("")
+            (self.view if self.view_name == "table" else self.cards).grab_focus()
+
+    def _search_changed(self, entry):
+        query = entry.get_text().strip()
+        if query == self.query:
+            return
+        self.query = query
+        self.filter.changed(Gtk.FilterChange.DIFFERENT)
+        self._refresh_summary()
 
     # -- selection and actions -------------------------------------------
     def selected(self):
@@ -1177,7 +1292,8 @@ class AccWindow(Gtk.ApplicationWindow):
         if self.compact:
             self.status.set_text(self.summary)
         elif self.sorted.get_n_items():
-            self.status.set_text("Double-click a NAS to open ADM. Right-click for more.")
+            self.status.set_text("Double-click a NAS to open ADM. Right-click for more. "
+                                 "Type to search.")
         else:
             self.status.set_text("Press Scan to search for ASUSTOR NAS devices.")
         self._status_timer = None
@@ -1214,6 +1330,7 @@ class AccApp(AppBase):
         self.add_action(quit_action)
         self.set_accels_for_action("app.quit", ["<Control>q"])
         self.set_accels_for_action("win.scan", ["F5", "<Control>r"])
+        self.set_accels_for_action("win.search", ["<Control>f"])
         self.set_accels_for_action("win.open", ["<Control>o"])
         self.set_accels_for_action("win.shares", ["<Control><Shift>o"])
         self.set_accels_for_action("win.ping", ["<Control>p"])

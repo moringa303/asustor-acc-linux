@@ -85,6 +85,19 @@ func (p *uptimeProbe) ask(ip string, patient bool) {
 	}()
 }
 
+// answered reports whether the NAS at ip replied to its uptime query,
+// waiting for the query to finish. No query, no reply.
+func (p *uptimeProbe) answered(ip string) bool {
+	p.mu.Lock()
+	q := p.queries[ip]
+	p.mu.Unlock()
+	if q == nil {
+		return false
+	}
+	<-q.done
+	return q.err == nil
+}
+
 // apply waits for the queries of the devices in list and records their
 // uptime. Queries for devices that are not in the list (remembered ones
 // that did not answer discovery) are left to time out on their own.

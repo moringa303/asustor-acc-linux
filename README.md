@@ -52,19 +52,25 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   Open ADM and Wake buttons, a link button that opens the selected
   model's HDD compatibility list (SSD list for the all-flash FS models)
   on asustor.com, a right-click menu (open shared folders,
-  copy the IP or MAC, forget a device), sortable columns, and automatic
-  refresh every 30 seconds. The table is the layout from 1000 px of
-  window width up (cells shorten with an ellipsis and show the full text
-  as a tooltip, never a horizontal scrollbar); narrower windows get a
-  card list. Offline devices stay in the
-  list, dimmed, so you can wake them.
+  copy the IP or MAC, forget a device), sortable columns, a search bar
+  (Ctrl+F, or just start typing: name, IP, model, serial, MAC and state
+  are matched), and automatic refresh every 30 seconds. The table is the
+  layout from 1000 px of window width up (cells shorten with an ellipsis
+  and show the full text as a tooltip, never a horizontal scrollbar; the
+  Model and State columns are always shown whole); narrower windows get a
+  card list. Offline devices stay in the list, dimmed, so you can wake
+  them. A NAS whose answer to one scan got lost (it happens on a segment
+  with hundreds of devices) keeps its place as online until it has been
+  missing for 2½ minutes, so the list does not flicker.
 
 - Uptime: read from the NAS via SNMP, shown in the CLI's UPTIME column
   and as the tooltip of the GUI's State cell (see [Uptime](#uptime)).
 
 - Device memory: `acc` remembers every NAS it has seen. A NAS that is
   asleep can still be woken with `acc wol <name>` or the GUI's Wake
-  button, and shows up as Offline with the time it was last seen.
+  button, and shows up as Offline with the time it was last seen. A
+  remembered NAS that misses a scan gets a second look, and one that
+  still answers SNMP counts as online even when its mDNS answer was lost.
 
 - `acc doctor`: mDNS health check that tells you whether nothing answers
   because of your firewall, your network topology, or a local mDNS daemon
