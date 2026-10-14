@@ -3,7 +3,7 @@
 
 Discovery, Wake-on-LAN and the device memory live in the bundled `acc`
 binary; this window presents its results like the Control Center device
-list, keeps them fresh, and shows for how long each NAS has been online.
+list, keeps them fresh and shows the uptime each NAS reports over SNMP.
 """
 import json
 import os
@@ -48,6 +48,23 @@ WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
 SCAN_TIMEOUT = 4  # seconds acc listens for answers
 REFRESH_SECONDS = int(os.environ.get("ACC_GUI_REFRESH", "30"))
 
+# Layout. The device list is a table when the window content is wide
+# enough to show every column in full and a list of cards below that, so
+# nothing is ever truncated or hidden behind a horizontal scrollbar.
+# TABLE_WIDTH is what the nine columns need for typical content (1010 px
+# measured with the test harness devices). Below COMPACT_WIDTH the header
+# bar keeps only the Scan icon, Open ADM and the menu (Wake stays in the
+# menus) and the summary moves from the title to the status bar, so the
+# window can shrink to MIN_WIDTH without hiding anything. Both are floors:
+# the real width the table and the full header bar need is measured too,
+# and a layout gives way LAYOUT_SLACK before that, because a window
+# manager keeps the window at the current layout's minimum width and
+# would otherwise never let it reach the breakpoint.
+TABLE_WIDTH = 1010
+COMPACT_WIDTH = 700
+LAYOUT_SLACK = 24
+MIN_WIDTH = 360
+
 # Table columns: title, Device property, whether the column takes the
 # spare width.
 COLUMNS = [
@@ -59,9 +76,9 @@ COLUMNS = [
     ("ADM", "adm", False),
     ("Port", "port", False),
     ("State", "state", False),
-    ("Online", "online_text", False),
+    ("Uptime", "uptime_text", False),
 ]
-TABULAR = {"ip", "serial", "mac", "adm", "port", "online_text"}
+TABULAR = {"ip", "serial", "mac", "adm", "port", "uptime_text"}
 
 STATE_CLASSES = {
     "Ready": "ready",
@@ -70,6 +87,10 @@ STATE_CLASSES = {
     "Offline": "offline",
 }
 
+UPTIME_TIP = "Uptime read from the NAS via SNMP"
+NO_UPTIME_TIP = ("Enable SNMP (v1/v2c, community public) in ADM › Services › SNMP "
+                 "to show the uptime")
+
 CSS = """
 .state-dot { min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }
 .state-dot.ready { background: #2ec27e; }
@@ -77,6 +98,8 @@ CSS = """
 .state-dot.notready { background: #e5a50a; }
 .state-dot.offline { background: #9a9996; }
 columnview > listview > row > cell { padding: 7px 12px; }
+listview.cards > row { padding: 8px 12px; }
+.card-name { font-weight: bold; }
 .tabular { font-variant-numeric: tabular-nums; }
 .empty-title { font-size: 1.4em; font-weight: bold; }
 .statusbar { padding: 6px 12px; }
@@ -93,15 +116,17 @@ def _parse_time(value):
         return None
 
 
-def format_duration(seconds):
+def format_uptime(seconds):
+    """274512 -> '3d 4h 15m'; 14700 -> '4h 05m'; 725 -> '12m 05s'."""
     s = max(0, int(seconds))
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m {s % 60:02d}s"
-    if s < 86400:
-        return f"{s // 3600}h {s % 3600 // 60:02d}m"
-    return f"{s // 86400}d {s % 86400 // 3600}h"
+    days, s = divmod(s, 86400)
+    hours, s = divmod(s, 3600)
+    minutes, s = divmod(s, 60)
+    if days:
+        return f"{days}d {hours}h {minutes:02d}m"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {s:02d}s"
 
 
 def format_seen(epoch):
@@ -114,7 +139,7 @@ def format_seen(epoch):
 class Device(GObject.Object):
     """One NAS as reported by `acc scan --json --all`.
 
-    Everything the table shows is a property, so cells stay bound to the
+    Everything the views show is a property, so cells stay bound to the
     object and update in place when a later scan changes it.
     """
 
@@ -127,13 +152,17 @@ class Device(GObject.Object):
     port = GObject.Property(type=str, default="")
     state = GObject.Property(type=str, default="")
     online = GObject.Property(type=bool, default=False)
-    online_text = GObject.Property(type=str, default="")
-    online_tip = GObject.Property(type=str, default="")
+    uptime_text = GObject.Property(type=str, default="")
+    uptime_tip = GObject.Property(type=str, default="")
+    # Card lines: "Ready · 192.168.1.10 · AS5304T · ADM 4.3.3 · port 8000"
+    # and "00:11:32:AA:BB:CC · AS2025TEST01".
+    details = GObject.Property(type=str, default="")
+    ids = GObject.Property(type=str, default="")
 
     def __init__(self, data):
         super().__init__()
         self.data = {}
-        self.online_since = None
+        self.uptime = None  # seconds the NAS reported, as of last_seen
         self.last_seen = None
         self.update(data)
 
@@ -150,6 +179,10 @@ class Device(GObject.Object):
         return self.data.get("url") or ""
 
     @property
+    def shares_url(self):
+        return self.data.get("shares_url") or ""
+
+    @property
     def initialized(self):
         return bool(self.data.get("initialized"))
 
@@ -164,27 +197,83 @@ class Device(GObject.Object):
         self.port = str(data.get("port") or "")
         self.online = bool(data.get("online"))
         self.state = (data.get("state") or "") if self.online else "Offline"
-        self.online_since = _parse_time(data.get("online_since"))
+        uptime = data.get("uptime_seconds")
+        self.uptime = int(uptime) if self.online and isinstance(uptime, (int, float)) else None
         self.last_seen = _parse_time(data.get("last_seen"))
+        parts = [self.state, self.ip, self.model,
+                 f"ADM {self.adm}" if self.adm else "",
+                 f"port {self.port}" if self.port else ""]
+        self.details = " · ".join(p for p in parts if p)
+        self.ids = " · ".join(p for p in (self.mac, self.serial) if p)
         self.tick()
 
+    def uptime_now(self):
+        """Seconds the NAS has been up right now, or None if it did not say."""
+        if not self.online or self.uptime is None:
+            return None
+        elapsed = time.time() - self.last_seen if self.last_seen else 0
+        return self.uptime + max(0, elapsed)
+
     def tick(self):
-        """Refresh the Online column text for the current time."""
-        if self.online and self.online_since:
-            text = format_duration(time.time() - self.online_since)
-            since = datetime.fromtimestamp(self.online_since).strftime("%-d %b %H:%M:%S")
-            tip = (f"Answering every scan since {since}.\n"
-                   "Observed by acc; ADM does not announce its uptime.")
+        """Refresh the Uptime text for the current time."""
+        up = self.uptime_now()
+        if up is not None:
+            text, tip = format_uptime(up), UPTIME_TIP
+        elif self.online:
+            text, tip = "–", NO_UPTIME_TIP
         elif self.last_seen:
             text = "last seen " + format_seen(self.last_seen)
             seen = datetime.fromtimestamp(self.last_seen).strftime("%-d %b %Y %H:%M:%S")
             tip = f"Last answered a scan on {seen}."
         else:
             text, tip = "", ""
-        if text != self.online_text:
-            self.online_text = text
-        if tip != self.online_tip:
-            self.online_tip = tip
+        if text != self.uptime_text:
+            self.uptime_text = text
+        if tip != self.uptime_tip:
+            self.uptime_tip = tip
+
+
+class ContentLayout(Gtk.BoxLayout):
+    """Box layout that tells its box the width it was really allocated.
+
+    A Gtk.Box hands allocation to its layout manager, so the box's own
+    size_allocate is never called; the allocate of the layout is where the
+    real width shows up. It lays the box out as usual first.
+    """
+
+    def do_allocate(self, widget, width, height, baseline):
+        Gtk.BoxLayout.do_allocate(self, widget, width, height, baseline)
+        widget.allocated(width)
+
+
+class ContentBox(Gtk.Box):
+    """Vertical box that reports layout changes from its allocated width.
+
+    classify(width) names the layout for the width the box really got
+    (not the window's default size). When that name changes, apply(name)
+    runs from an idle handler: swapping stack pages during allocation is
+    not allowed.
+    """
+
+    def __init__(self, classify, apply):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.set_layout_manager(ContentLayout(orientation=Gtk.Orientation.VERTICAL))
+        self._classify, self._apply = classify, apply
+        self._layout = None
+        self._pending = False
+
+    def allocated(self, width):
+        layout = self._classify(width)
+        if layout != self._layout:
+            self._layout = layout
+            if not self._pending:
+                self._pending = True
+                GLib.idle_add(self._flush)
+
+    def _flush(self):
+        self._pending = False
+        self._apply(self._layout)
+        return GLib.SOURCE_REMOVE
 
 
 class AccWindow(Gtk.ApplicationWindow):
@@ -192,18 +281,24 @@ class AccWindow(Gtk.ApplicationWindow):
         super().__init__(application=app, title="Asustor ACC for Linux")
         self.set_icon_name(APP_ID)
         self.set_default_size(1100, 560)
+        self.set_size_request(MIN_WIDTH, 300)
         self.scanning = False
         self.auto_refresh = True
         self.show_offline = True
         self.last_scan = None
         self.last_error = None
         self.acc_version = ""
+        self.summary = ""
+        self.view_name = "table"
+        self.compact = False
+        self._table_width = 0  # widest the table measured since the last scan
+        self._header_width = 0  # widest the full header bar measured so far
         self._status_timer = None
-        self._name_cells = {}
+        self._rows = {}  # view -> {list item: (device, row widget)}
 
         self._build_actions()
         self._build_header()
-        self._build_table()
+        self._build_views()
         self._build_body()
 
         GLib.timeout_add_seconds(1, self._tick)
@@ -216,6 +311,7 @@ class AccWindow(Gtk.ApplicationWindow):
         plain = [
             ("scan", self.scan),
             ("open", self.open_selected),
+            ("shares", self.open_shares),
             ("wake", self.wake_selected),
             ("copy-ip", lambda: self._copy("ip")),
             ("copy-mac", lambda: self._copy("mac")),
@@ -242,29 +338,36 @@ class AccWindow(Gtk.ApplicationWindow):
             self._refresh_summary()
 
     def _build_header(self):
-        header = Gtk.HeaderBar()
+        header = self.header = Gtk.HeaderBar()
         self.set_titlebar(header)
 
         scan_btn = Gtk.Button(action_name="win.scan")
         content = Gtk.Box(spacing=6)
         content.append(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
-        content.append(Gtk.Label(label="Scan"))
+        self.scan_label = Gtk.Label(label="Scan")
+        content.append(self.scan_label)
         scan_btn.set_child(content)
         scan_btn.set_tooltip_text("Search the local network for ASUSTOR NAS devices (F5)")
         header.pack_start(scan_btn)
         self.spinner = Gtk.Spinner()
         header.pack_start(self.spinner)
 
-        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        self.titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
         title = Gtk.Label(label="Asustor ACC")
         title.add_css_class("title")
-        self.subtitle = Gtk.Label(label="Scanning the local network…")
+        self.subtitle = Gtk.Label()
         self.subtitle.add_css_class("subtitle")
-        titles.append(title)
-        titles.append(self.subtitle)
-        header.set_title_widget(titles)
+        self.titles.append(title)
+        self.titles.append(self.subtitle)
+        header.set_title_widget(self.titles)
+        self._show_summary("Scanning the local network…")
 
         menu = Gio.Menu()
+        section = Gio.Menu()
+        section.append("Open ADM", "win.open")
+        section.append("Open shared folders", "win.shares")
+        section.append("Wake (WOL)", "win.wake")
+        menu.append_section(None, section)
         section = Gio.Menu()
         section.append(f"Refresh every {REFRESH_SECONDS} s", "win.auto-refresh")
         section.append("Show offline devices", "win.show-offline")
@@ -284,11 +387,12 @@ class AccWindow(Gtk.ApplicationWindow):
         self.open_btn.add_css_class("suggested-action")
         self.open_btn.set_tooltip_text("Open the web interface of the selected NAS (Ctrl+O)")
         header.pack_end(self.open_btn)
-        wake_btn = Gtk.Button(label="Wake", action_name="win.wake")
-        wake_btn.set_tooltip_text("Send a Wake-on-LAN magic packet to the selected NAS")
-        header.pack_end(wake_btn)
+        self.wake_btn = Gtk.Button(label="Wake", action_name="win.wake")
+        self.wake_btn.set_tooltip_text("Send a Wake-on-LAN magic packet to the selected NAS")
+        header.pack_end(self.wake_btn)
 
-    def _build_table(self):
+    def _build_views(self):
+        """The table and the card list: two views of one selection."""
         self.store = Gio.ListStore.new(Device)
         self.filter = Gtk.CustomFilter.new(lambda dev, *_: self.show_offline or dev.online)
         filtered = Gtk.FilterListModel.new(self.store, self.filter)
@@ -306,20 +410,29 @@ class AccWindow(Gtk.ApplicationWindow):
             factory = Gtk.SignalListItemFactory()
             factory.connect("setup", self._setup_cell, prop)
             factory.connect("bind", self._bind_cell, prop)
-            factory.connect("unbind", self._unbind_cell, prop)
+            factory.connect("unbind", self._unbind)
             col = Gtk.ColumnViewColumn.new(title, factory)
             col.set_expand(expand)
-            col.set_resizable(True)
             col.set_sorter(Gtk.CustomSorter.new(lambda a, b, *_, p=prop: self._compare(a, b, p)))
             self.view.append_column(col)
             if prop == "name":
                 name_col = col
         self.view.sort_by_column(name_col, Gtk.SortType.ASCENDING)
 
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._setup_card)
+        factory.connect("bind", self._bind_card)
+        factory.connect("unbind", self._unbind)
+        self.cards = Gtk.ListView.new(self.selection, factory)
+        self.cards.set_show_separators(True)
+        self.cards.add_css_class("cards")
+        self.cards.connect("activate", lambda _v, pos: self._open(self.sorted.get_item(pos)))
+
         # Right click: select the row under the pointer and show its menu.
         model = Gio.Menu()
         section = Gio.Menu()
         section.append("Open ADM", "win.open")
+        section.append("Open shared folders", "win.shares")
         section.append("Wake (WOL)", "win.wake")
         model.append_section(None, section)
         section = Gio.Menu()
@@ -329,24 +442,32 @@ class AccWindow(Gtk.ApplicationWindow):
         section = Gio.Menu()
         section.append("Forget this device", "win.forget")
         model.append_section(None, section)
-        self.row_menu = Gtk.PopoverMenu.new_from_model(model)
-        self.row_menu.set_parent(self.view)
-        self.row_menu.set_has_arrow(False)
-        click = Gtk.GestureClick(button=3)
-        click.connect("pressed", self._row_right_click)
-        self.view.add_controller(click)
+        self.row_menus = {}
+        for view in (self.view, self.cards):
+            self._rows[view] = {}
+            popover = Gtk.PopoverMenu.new_from_model(model)
+            popover.set_parent(view)
+            popover.set_has_arrow(False)
+            self.row_menus[view] = popover
+            click = Gtk.GestureClick(button=3)
+            click.connect("pressed", self._row_right_click)
+            view.add_controller(click)
 
     def _build_body(self):
-        scroll = Gtk.ScrolledWindow(vexpand=True, child=self.view)
-        self.stack = Gtk.Stack(vexpand=True)
-        self.stack.add_named(scroll, "list")
+        # Horizontal scrollbars are never shown: the table is only used at
+        # widths where every column fits, and the cards wrap their text.
+        never = Gtk.PolicyType.NEVER
+        self.stack = Gtk.Stack(vexpand=True, hhomogeneous=False)
+        self.stack.add_named(Gtk.ScrolledWindow(child=self.view, hscrollbar_policy=never), "table")
+        self.stack.add_named(Gtk.ScrolledWindow(child=self.cards, hscrollbar_policy=never), "cards")
         self.stack.add_named(self._build_empty_page(), "empty")
 
-        self.status = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        self.status = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
+                                lines=3, ellipsize=Pango.EllipsizeMode.END)
         self.status.add_css_class("dim-label")
         self.status.add_css_class("statusbar")
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box = ContentBox(self._classify_layout, self._apply_layout)
         box.append(self.stack)
         box.append(Gtk.Separator())
         box.append(self.status)
@@ -360,7 +481,8 @@ class AccWindow(Gtk.ApplicationWindow):
         icon = Gtk.Image.new_from_icon_name("network-server-symbolic")
         icon.set_pixel_size(96)
         icon.add_css_class("dim-label")
-        self.empty_title = Gtk.Label(label="No ASUSTOR NAS found")
+        self.empty_title = Gtk.Label(label="No ASUSTOR NAS found", wrap=True,
+                                     justify=Gtk.Justification.CENTER)
         self.empty_title.add_css_class("empty-title")
         self.empty_text = Gtk.Label(wrap=True, max_width_chars=52, justify=Gtk.Justification.CENTER)
         self.empty_text.add_css_class("dim-label")
@@ -373,7 +495,37 @@ class AccWindow(Gtk.ApplicationWindow):
             page.append(w)
         return page
 
-    # -- cells -----------------------------------------------------------
+    # -- responsive layout -----------------------------------------------
+    def _classify_layout(self, width):
+        """Layout for the content width: (view name, compact header)."""
+        # The table keeps its cells while hidden, so its width is known in
+        # both layouts. The full header bar can only be measured while it
+        # is shown, so its width is remembered from then.
+        natural = self.view.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+        self._table_width = max(self._table_width, natural + LAYOUT_SLACK)
+        if not self.compact:
+            minimum = self.header.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+            self._header_width = max(self._header_width, minimum + LAYOUT_SLACK)
+        return ("table" if width >= max(TABLE_WIDTH, self._table_width) else "cards",
+                width < max(COMPACT_WIDTH, self._header_width))
+
+    def _apply_layout(self, layout):
+        self.view_name, self.compact = layout
+        if self.stack.get_visible_child_name() != "empty":
+            self.stack.set_visible_child_name(self.view_name)
+        for widget in (self.wake_btn, self.scan_label, self.titles):
+            widget.set_visible(not self.compact)
+        if self._status_timer is None and not self.last_error:
+            self._set_hint()
+
+    def _show_summary(self, text):
+        """Device summary: the header subtitle, or the status bar when compact."""
+        self.summary = text
+        self.subtitle.set_text(text)
+        if self.compact and self._status_timer is None and not self.last_error:
+            self._set_hint()
+
+    # -- table cells -----------------------------------------------------
     def _setup_cell(self, _factory, item, prop):
         label = Gtk.Label(xalign=0)
         if prop in TABULAR:
@@ -394,32 +546,67 @@ class AccWindow(Gtk.ApplicationWindow):
         label = getattr(widget, "label", widget)
         flags = GObject.BindingFlags.SYNC_CREATE
         item.bindings = [dev.bind_property(prop, label, "label", flags)]
-        if prop == "online_text":
-            item.bindings.append(dev.bind_property("online_tip", label, "tooltip-text", flags))
-        item.handlers = [dev.connect("notify::online", lambda *_: self._style_cell(widget, dev))]
+        if prop == "uptime_text":
+            item.bindings.append(dev.bind_property("uptime_tip", label, "tooltip-text", flags))
+        item.handlers = [dev.connect("notify::online", lambda *_: self._style(widget, dev))]
         if prop == "state":
-            item.handlers.append(dev.connect("notify::state", lambda *_: self._style_cell(widget, dev)))
-        self._style_cell(widget, dev)
+            item.handlers.append(dev.connect("notify::state", lambda *_: self._style(widget, dev)))
+        self._style(widget, dev)
         if prop == "name":
-            self._name_cells[item] = (dev, widget)
+            self._rows[self.view][item] = (dev, widget)
 
-    def _unbind_cell(self, _factory, item, prop):
+    # -- cards -----------------------------------------------------------
+    def _setup_card(self, _factory, item):
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        top = Gtk.Box(spacing=8)
+        row.dot = Gtk.Box(valign=Gtk.Align.CENTER)
+        row.dot.add_css_class("state-dot")
+        row.name = Gtk.Label(xalign=0, hexpand=True, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+        row.name.add_css_class("card-name")
+        row.uptime = Gtk.Label(xalign=1, valign=Gtk.Align.CENTER)
+        row.uptime.add_css_class("tabular")
+        for w in (row.dot, row.name, row.uptime):
+            top.append(w)
+        row.details = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+        row.ids = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+        row.ids.add_css_class("tabular")
+        for w in (top, row.details, row.ids):
+            row.append(w)
+        item.set_child(row)
+
+    def _bind_card(self, _factory, item):
+        dev, row = item.get_item(), item.get_child()
+        flags = GObject.BindingFlags.SYNC_CREATE
+        item.bindings = [
+            dev.bind_property("name", row.name, "label", flags),
+            dev.bind_property("uptime_text", row.uptime, "label", flags),
+            dev.bind_property("uptime_tip", row.uptime, "tooltip-text", flags),
+            dev.bind_property("details", row.details, "label", flags),
+            dev.bind_property("ids", row.ids, "label", flags),
+        ]
+        item.handlers = [dev.connect("notify::online", lambda *_: self._style(row, dev)),
+                         dev.connect("notify::state", lambda *_: self._style(row, dev))]
+        self._style(row, dev)
+        self._rows[self.cards][item] = (dev, row)
+
+    def _unbind(self, _factory, item):
         dev = item.get_item()
         for binding in item.bindings:
             binding.unbind()
         for handler in item.handlers:
             dev.disconnect(handler)
         item.bindings, item.handlers = [], []
-        if prop == "name":
-            self._name_cells.pop(item, None)
+        for rows in self._rows.values():
+            rows.pop(item, None)
 
     @staticmethod
-    def _style_cell(widget, dev):
-        label = getattr(widget, "label", widget)
+    def _style(widget, dev):
+        """Dim offline devices and colour the state dot (cells and cards)."""
+        target = getattr(widget, "label", widget)
         if dev.online:
-            label.remove_css_class("dim-label")
+            target.remove_css_class("dim-label")
         else:
-            label.add_css_class("dim-label")
+            target.add_css_class("dim-label")
         dot = getattr(widget, "dot", None)
         if dot is not None:
             for cls in STATE_CLASSES.values():
@@ -431,10 +618,14 @@ class AccWindow(Gtk.ApplicationWindow):
         # Offline devices always sink to the bottom.
         if a.online != b.online:
             return -1 if a.online else 1
-        if prop == "online_text":
-            # Ascending = shortest online first; offline ones by last seen.
-            ka = -(a.online_since or 0) if a.online else -(a.last_seen or 0)
-            kb = -(b.online_since or 0) if b.online else -(b.last_seen or 0)
+        if prop == "uptime_text":
+            # Ascending = shortest uptime first, unknown uptime last;
+            # offline ones by last seen, most recent first.
+            if a.online:
+                ua, ub = a.uptime_now(), b.uptime_now()
+                ka, kb = (ua is None, ua or 0), (ub is None, ub or 0)
+            else:
+                ka, kb = -(a.last_seen or 0), -(b.last_seen or 0)
         elif prop == "port":
             ka, kb = int(a.port or 0), int(b.port or 0)
         else:
@@ -448,7 +639,7 @@ class AccWindow(Gtk.ApplicationWindow):
         self.scanning = True
         self.lookup_action("scan").set_enabled(False)
         self.spinner.start()
-        self.subtitle.set_text("Scanning the local network…")
+        self._show_summary("Scanning the local network…")
 
         def worker():
             try:
@@ -482,7 +673,7 @@ class AccWindow(Gtk.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def _apply(self, devices):
-        """Update the table in place so selection and scroll position stay."""
+        """Update the views in place so selection and scroll position stay."""
         fresh = {Device.key_of(d): d for d in devices}
         i = 0
         while i < self.store.get_n_items():
@@ -499,6 +690,7 @@ class AccWindow(Gtk.ApplicationWindow):
         sorter = self.view.get_sorter()
         if sorter is not None:
             sorter.changed(Gtk.SorterChange.DIFFERENT)
+        self._table_width = 0  # content changed: measure the table afresh
 
     def _auto_scan(self):
         if self.auto_refresh and not self.scanning:
@@ -525,10 +717,10 @@ class AccWindow(Gtk.ApplicationWindow):
         summary = " · ".join(parts) if parts else "No devices"
         if self.last_scan:
             summary += " · scanned " + time.strftime("%H:%M:%S", time.localtime(self.last_scan))
-        self.subtitle.set_text(summary)
+        self._show_summary(summary)
 
         if self.sorted.get_n_items():
-            self.stack.set_visible_child_name("list")
+            self.stack.set_visible_child_name(self.view_name)
         else:
             if self.last_error:
                 self.empty_title.set_text("Scan failed")
@@ -558,6 +750,8 @@ class AccWindow(Gtk.ApplicationWindow):
     def _selection_changed(self):
         dev = self.selected()
         self.lookup_action("open").set_enabled(dev is not None and dev.online and bool(dev.url))
+        self.lookup_action("shares").set_enabled(
+            dev is not None and dev.online and bool(dev.shares_url))
         self.lookup_action("wake").set_enabled(dev is not None and bool(dev.mac))
         self.lookup_action("copy-ip").set_enabled(dev is not None and bool(dev.ip))
         self.lookup_action("copy-mac").set_enabled(dev is not None and bool(dev.mac))
@@ -569,16 +763,17 @@ class AccWindow(Gtk.ApplicationWindow):
             "Open the setup wizard of the selected NAS (Ctrl+O)" if setup else
             "Open the web interface of the selected NAS (Ctrl+O)")
 
-    def _device_at(self, y):
-        """The device of the row at window y, from the bound Name cells."""
-        for dev, widget in self._name_cells.values():
-            ok, bounds = widget.compute_bounds(self.view)
+    def _device_at(self, view, y):
+        """The device of the row at y in view, from its bound row widgets."""
+        for dev, widget in self._rows[view].values():
+            ok, bounds = widget.compute_bounds(view)
             if ok and bounds.get_y() <= y < bounds.get_y() + bounds.get_height():
                 return dev
         return None
 
-    def _row_right_click(self, _gesture, _n_press, x, y):
-        dev = self._device_at(y)
+    def _row_right_click(self, gesture, _n_press, x, y):
+        view = gesture.get_widget()
+        dev = self._device_at(view, y)
         if dev is not None:
             for i in range(self.sorted.get_n_items()):
                 if self.sorted.get_item(i).key == dev.key:
@@ -588,8 +783,15 @@ class AccWindow(Gtk.ApplicationWindow):
             return
         rect = Gdk.Rectangle()
         rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
-        self.row_menu.set_pointing_to(rect)
-        self.row_menu.popup()
+        menu = self.row_menus[view]
+        menu.set_pointing_to(rect)
+        menu.popup()
+
+    def _launch(self, uri):
+        try:
+            Gio.AppInfo.launch_default_for_uri(uri, None)
+        except GLib.Error as exc:
+            self.set_status(f"Could not open {uri}: {exc.message}")
 
     def _open(self, dev):
         if dev is None:
@@ -600,10 +802,22 @@ class AccWindow(Gtk.ApplicationWindow):
         if not dev.url:
             self.set_status(f"{dev.name} did not report an address.")
             return
-        Gio.AppInfo.launch_default_for_uri(dev.url, None)
+        self._launch(dev.url)
 
     def open_selected(self):
         self._open(self.selected())
+
+    def open_shares(self):
+        dev = self.selected()
+        if dev is None:
+            return
+        if not dev.online:
+            self.set_status(f"{dev.name} is not answering; wake it first.")
+            return
+        if not dev.shares_url:
+            self.set_status(f"{dev.name} did not report an IPv4 address.")
+            return
+        self._launch(dev.shares_url)
 
     def wake_selected(self):
         dev = self.selected()
@@ -668,9 +882,10 @@ class AccWindow(Gtk.ApplicationWindow):
                          default_width=760, default_height=520)
         win.set_titlebar(Gtk.HeaderBar())
         text = Gtk.TextView(editable=False, monospace=True, cursor_visible=False,
+                            wrap_mode=Gtk.WrapMode.WORD_CHAR,
                             left_margin=12, right_margin=12, top_margin=12, bottom_margin=12)
         text.get_buffer().set_text("Running acc doctor, this takes a few seconds…\n")
-        win.set_child(Gtk.ScrolledWindow(child=text))
+        win.set_child(Gtk.ScrolledWindow(child=text, hscrollbar_policy=Gtk.PolicyType.NEVER))
         escape = Gtk.ShortcutController()
         escape.add_shortcut(Gtk.Shortcut.new(
             Gtk.ShortcutTrigger.parse_string("Escape"),
@@ -713,7 +928,9 @@ class AccWindow(Gtk.ApplicationWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _set_hint(self):
-        if self.store.get_n_items():
+        if self.compact:
+            self.status.set_text(self.summary)
+        elif self.store.get_n_items():
             self.status.set_text("Double-click a NAS to open ADM. Right-click for more.")
         else:
             self.status.set_text("Press Scan to search for ASUSTOR NAS devices.")
@@ -752,6 +969,7 @@ class AccApp(AppBase):
         self.set_accels_for_action("app.quit", ["<Control>q"])
         self.set_accels_for_action("win.scan", ["F5", "<Control>r"])
         self.set_accels_for_action("win.open", ["<Control>o"])
+        self.set_accels_for_action("win.shares", ["<Control><Shift>o"])
 
     def do_activate(self):
         win = self.get_active_window() or AccWindow(self)

@@ -12,9 +12,9 @@ import (
 // Device memory: acc keeps every NAS it has seen in
 // $XDG_CACHE_HOME/asustor-acc/devices.json. That is what lets
 // `acc wol <name>` wake a NAS that is asleep (its MAC is remembered), lets
-// `acc scan --all` and the GUI list devices that are currently offline, and
-// is where the online time comes from: for every NAS, when the current
-// run of consecutive scans that saw it began, and when it was last seen.
+// `acc scan --all` and the GUI list devices that are currently offline
+// (with when they were last seen), and is what lets a scan ask remembered
+// devices for their uptime while discovery is still listening.
 
 // memoryMaxAge is how long a device that no longer answers stays in the
 // memory.
@@ -71,8 +71,8 @@ func saveMemory(list []Nas) {
 
 // remember merges the devices found by a scan into the device memory and
 // returns the complete list: found devices (online) followed by remembered
-// ones that did not answer (offline). A NAS keeps its OnlineSince as long
-// as every scan sees it; the first scan that misses it ends the run.
+// ones that did not answer (offline). An uptime is only ever reported for
+// a NAS that answered; the SNMP marker survives a scan without one.
 func remember(known, found []Nas, now time.Time) []Nas {
 	now = now.Truncate(time.Second)
 	prev := map[string]Nas{}
@@ -82,11 +82,11 @@ func remember(known, found []Nas, now time.Time) []Nas {
 
 	all := make([]Nas, 0, len(found)+len(prev))
 	for _, n := range found {
-		n.Online, n.LastSeen, n.OnlineSince = true, now, now
-		if p, ok := prev[n.key()]; ok && p.Online && !p.OnlineSince.IsZero() {
-			n.OnlineSince = p.OnlineSince
+		n.Online, n.LastSeen = true, now
+		if p, ok := prev[n.key()]; ok && p.SNMP {
+			n.SNMP = true
 		}
-		n.URL = n.webURL()
+		n.URL, n.SharesURL = n.webURL(), n.sharesURL()
 		delete(prev, n.key())
 		all = append(all, n)
 	}
@@ -97,7 +97,8 @@ func remember(known, found []Nas, now time.Time) []Nas {
 			continue
 		}
 		p.Online = false
-		p.URL = p.webURL()
+		p.UptimeSeconds, p.UptimeSource = nil, ""
+		p.URL, p.SharesURL = p.webURL(), p.sharesURL()
 		offline = append(offline, p)
 	}
 	sort.Slice(offline, func(i, j int) bool {
