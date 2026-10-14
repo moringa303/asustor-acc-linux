@@ -145,15 +145,16 @@ def file_managers():
             found.append(fm)
     return found
 
-# Link to the model's compatibility list on asustor.com. Without an exact
-# address scheme the default goes through DuckDuckGo's "I'm feeling ducky"
-# redirect to the first asustor.com hit; ~/.config/asustor-acc/links.json
-# can replace the template ({model} is substituted, {media} is HDD or
-# SSD) and override single models:
-#   {"compat": "https://...{model}...{media}...",
+# The compatibility lists on asustor.com: the HDD list for AS models, the
+# M.2 SSD list for the all-flash FS models. The NAS series is picked in
+# the page's own filter. ~/.config/asustor-acc/links.json can replace
+# either address ({model} and {media} are substituted) and override
+# single models:
+#   {"hdd": "https://...", "ssd": "https://...",
 #    "models": {"AS6704T": {"compat": "https://..."}}}
 LINK_TEMPLATES = {
-    "compat": "https://duckduckgo.com/?q=%5C+site%3Aasustor.com+{model}+{media}+compatibility+list",
+    "hdd": "https://www.asustor.com/service/hd?id=hd",
+    "ssd": "https://www.asustor.com/service/m2ssd?id=m2ssd",
 }
 LINKS_FILE = os.path.join(GLib.get_user_config_dir(), "asustor-acc", "links.json")
 
@@ -178,8 +179,8 @@ def model_links(model):
     links = _load_links()
     templates = {**LINK_TEMPLATES, **{k: v for k, v in links.items() if k in LINK_TEMPLATES}}
     override = links.get("models", {}).get(base, {}) if isinstance(links.get("models"), dict) else {}
-    compat = override.get("compat") or templates["compat"].format(model=base, media=media)
-    return compat, media
+    template = override.get("compat") or links.get("compat") or templates[media.lower()]
+    return template.format(model=base, media=media), media
 
 CSS = f"""
 .state-dot {{ min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }}

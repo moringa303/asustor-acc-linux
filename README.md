@@ -11,7 +11,7 @@ Wake-on-LAN, and see each NAS's uptime. Comes as a dependency-free CLI
 
 ![icon](assets/icon-128.png)
 
-![acc-gui: device table with three NAS online and two remembered offline devices](assets/screenshot.png)
+![acc-gui in dark mode: device table with four NAS online and one remembered offline device](assets/screenshot.png)
 
 ASUSTOR ships Control Center for Windows and macOS only. This project
 speaks the same discovery protocol, natively on Linux.
@@ -240,20 +240,22 @@ and reload buttons and one that hands the page to your browser; the
 window works at any width from 360 px up. That needs the WebKitGTK 6.0
 bindings, which the packages recommend (`gir1.2-webkit-6.0` on Debian
 and Ubuntu, `webkitgtk6.0` on Fedora, `webkitgtk-6.0` on Arch); without
-them the list opens in the browser. Without an exact address scheme the
-link goes through DuckDuckGo's "I'm feeling ducky" redirect to the first
-asustor.com hit for the model. To use an exact address instead, create
+them the list opens in the browser. The addresses are
+`https://www.asustor.com/service/hd?id=hd` (HDD) and
+`https://www.asustor.com/service/m2ssd?id=m2ssd` (M.2 SSD); pick the NAS
+series in the page's own filter. To use other addresses, create
 `~/.config/asustor-acc/links.json`:
 
 ```json
 {
-  "compat": "https://www.asustor.com/en/compatibility?model={model}&type={media}",
+  "hdd": "https://www.asustor.com/service/hd?id=hd&series_id=1",
+  "ssd": "https://www.asustor.com/service/m2ssd?id=m2ssd",
   "models": {"AS6704T": {"compat": "https://..."}}
 }
 ```
 
-`{model}` is the model number, `{media}` is `HDD` or `SSD`; entries under
-`models` override the template for one model.
+`{model}` and `{media}` (`HDD` or `SSD`) are substituted in any of the
+addresses; entries under `models` override the address for one model.
 
 ## Troubleshooting: "No devices found"
 
