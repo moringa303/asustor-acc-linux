@@ -92,25 +92,32 @@ func parseAvahiLine(line string, initialized bool) (nas Nas, iface string, ok bo
 	return nas, f[1], true
 }
 
-// avahiUnescape decodes avahi's \ddd decimal escapes (e.g. \032 = space).
+// avahiUnescape decodes avahi's escapes in instance names: \ddd for a
+// byte in decimal (\032 = space) and a backslash before '.' and '\'.
 func avahiUnescape(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+3 < len(s) &&
-			s[i+1] >= '0' && s[i+1] <= '9' &&
-			s[i+2] >= '0' && s[i+2] <= '9' &&
-			s[i+3] >= '0' && s[i+3] <= '9' {
-			n, _ := strconv.Atoi(s[i+1 : i+4])
-			b.WriteByte(byte(n))
-			i += 3
-		} else if s[i] == '\\' && i+1 < len(s) {
-			b.WriteByte(s[i+1])
-			i++
-		} else {
+		if s[i] != '\\' || i+1 >= len(s) {
 			b.WriteByte(s[i])
+			continue
 		}
+		if i+3 < len(s) && isDigit(s[i+1]) && isDigit(s[i+2]) && isDigit(s[i+3]) {
+			// Avahi never writes a value above 255; one would be a
+			// byte overflow, so it is read as a stray backslash.
+			if n, _ := strconv.Atoi(s[i+1 : i+4]); n <= 255 {
+				b.WriteByte(byte(n))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i+1])
+		i++
 	}
 	return b.String()
+}
+
+func isDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }
 
 // parseAvahiTxt splits `"k=v" "k2=v2"` into []string{"k=v", "k2=v2"}.

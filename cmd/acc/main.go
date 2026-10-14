@@ -315,6 +315,9 @@ func main() {
 		if cmd == "shares" {
 			url, what = nas.SharesURL, "file manager"
 		}
+		if url == "" && cmd == "shares" {
+			fail(fmt.Errorf("%s has no IPv4 address; shared folders need one", nas.Name))
+		}
 		if url == "" {
 			fail(fmt.Errorf("%s did not report an address", nas.Name))
 		}

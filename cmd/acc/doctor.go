@@ -23,7 +23,11 @@ func doctor(timeout time.Duration) {
 	fmt.Println("acc doctor: mDNS discovery health check")
 	fmt.Println()
 
-	ifaces, _ := net.Interfaces()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		fmt.Printf("RESULT: cannot list network interfaces: %v\n", err)
+		return
+	}
 	var candidates []net.Interface
 	fmt.Println("Network interfaces:")
 	for _, ifc := range ifaces {
