@@ -34,6 +34,16 @@ func scan(timeout time.Duration) ([]Nas, error) {
 	if err != nil {
 		return nil, err
 	}
+	if up := stillUp(known, found, probe.answered); len(up) > 0 {
+		for _, n := range up {
+			vlog("%s answered SNMP but not mDNS, keeping it online", n.Name)
+		}
+		byKey := map[string]Nas{}
+		for _, n := range append(found, up...) {
+			mergeNas(byKey, n)
+		}
+		found = sortedByName(byKey)
+	}
 	if missing := missingSince(known, found); len(missing) > 0 {
 		vlog("no answer from %s, looking again for %s", strings.Join(missing, ", "), recheckTimeout)
 		again, _ := discover(recheckTimeout)
@@ -51,6 +61,24 @@ func scan(timeout time.Duration) ([]Nas, error) {
 	}
 	probe.apply(found)
 	return remember(known, found, time.Now()), nil
+}
+
+// stillUp returns the remembered devices that answered the previous scan,
+// are absent from found and have just answered an SNMP query: such a NAS
+// is up and only its mDNS answer was lost, so it keeps its place in the
+// list. answered(ip) is expected to wait for the query to finish.
+func stillUp(known, found []Nas, answered func(ip string) bool) []Nas {
+	present := map[string]bool{}
+	for _, n := range found {
+		present[n.key()] = true
+	}
+	var up []Nas
+	for _, k := range known {
+		if k.Online && !present[k.key()] && k.IP != "" && answered(k.IP) {
+			up = append(up, k)
+		}
+	}
+	return up
 }
 
 // missingSince names the remembered devices that answered the previous
@@ -185,6 +213,22 @@ func builtinScan(timeout time.Duration) ([]Nas, error) {
 	if err := browse("_ASUSTOR_INIT._tcp", false); err != nil {
 		return nil, err
 	}
+	// A second query halfway through: on a segment with hundreds of
+	// NAS, answers to a single query do get lost, and the resolver's
+	// own retry would only come after the listen is over.
+	time.AfterFunc(timeout/2, func() {
+		if ctx.Err() != nil {
+			return
+		}
+		for _, svc := range []struct {
+			name string
+			init bool
+		}{{"_ASUSTOR_ADM._tcp", true}, {"_ASUSTOR_INIT._tcp", false}} {
+			if err := browse(svc.name, svc.init); err != nil {
+				vlog("second query for %s: %v", svc.name, err)
+			}
+		}
+	})
 	<-ctx.Done()
 
 	mu.Lock()
