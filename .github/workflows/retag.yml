@@ -1,0 +1,32 @@
+name: retag
+# One-off: move tags to other commits (same contents, rewritten history).
+# Run by hand with lines of "tag sha [message]" — a message makes an
+# annotated tag. Pushes with the repository token, so no release runs.
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: "One tag per line: <tag> <sha> [annotation message]"
+        required: true
+permissions:
+  contents: write
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Re-point tags
+        env:
+          SPEC: ${{ inputs.spec }}
+        run: |
+          git config user.name "Frank Eckardt"
+          git config user.email "frank@takindo.com"
+          printf '%s\n' "$SPEC" | while read -r tag sha msg; do
+            [ -n "$tag" ] || continue
+            git rev-parse --verify "$sha^{commit}" >/dev/null
+            if [ -n "$msg" ]; then git tag -f -a "$tag" "$sha" -m "$msg"; else git tag -f "$tag" "$sha"; fi
+            git push -f origin "refs/tags/$tag"
+            echo "$tag -> $(git rev-parse --short "$sha")"
+          done
