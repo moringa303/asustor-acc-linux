@@ -7,6 +7,7 @@ list, keeps them fresh and shows the uptime each NAS reports over SNMP.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,9 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+gi.require_version("Gsk", "4.0")
+gi.require_version("Graphene", "1.0")
+from gi.repository import Gdk, Gio, GLib, GObject, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
 # libadwaita is optional. With it the window follows the system's
 # light/dark preference and gets the current GNOME header bar look.
@@ -53,19 +56,18 @@ WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
 SCAN_TIMEOUT = 4  # seconds acc listens for answers
 REFRESH_SECONDS = int(os.environ.get("ACC_GUI_REFRESH", "30"))
 
-# Layout. The device list is a table when the window content is wide
-# enough to show every column in full and a list of cards below that, so
-# nothing is ever truncated or hidden behind a horizontal scrollbar.
-# TABLE_WIDTH is what the nine columns need for typical content (1010 px
-# measured with the test harness devices). Below COMPACT_WIDTH the header
-# bar keeps only the Scan icon, Open ADM and the menu (Wake stays in the
-# menus) and the summary moves from the title to the status bar, so the
-# window can shrink to MIN_WIDTH without hiding anything. Both are floors:
-# the real width the table and the full header bar need is measured too,
-# and a layout gives way LAYOUT_SLACK before that, because a window
-# manager keeps the window at the current layout's minimum width and
-# would otherwise never let it reach the breakpoint.
-TABLE_WIDTH = 1010
+# Layout. The device list is the familiar table whenever the window is
+# at least TABLE_WIDTH wide; the cells ellipsize (the full text is in the
+# tooltip) so the table always fits and never needs a horizontal
+# scrollbar. Narrower windows get a list of cards that wrap their text.
+# Below COMPACT_WIDTH the header bar keeps only the Scan icon, Open ADM
+# and the menu (Wake stays in the menus) and the summary moves from the
+# title to the status bar, so the window can shrink to MIN_WIDTH. The
+# compact threshold is a floor: the real width the full header bar needs
+# is measured too, and it gives way LAYOUT_SLACK before that, because a
+# window manager keeps the window at the current layout's minimum width
+# and would otherwise never let it reach the breakpoint.
+TABLE_WIDTH = 1000
 COMPACT_WIDTH = 700
 LAYOUT_SLACK = 24
 MIN_WIDTH = 360
@@ -73,9 +75,9 @@ MIN_WIDTH = 360
 # Table columns: title, Device property, whether the column takes the
 # spare width.
 COLUMNS = [
+    ("Model", "model", False),
     ("Name", "name", True),
     ("IP Address", "ip", False),
-    ("Model", "model", False),
     ("Serial Number", "serial", False),
     ("MAC Address", "mac", False),
     ("ADM", "adm", False),
@@ -139,6 +141,79 @@ def format_seen(epoch):
     if t.date() == datetime.now().date():
         return t.strftime("%H:%M")
     return t.strftime("%-d %b")
+
+
+def model_shape(model):
+    """Bay count and form factor read off an ASUSTOR model number:
+    AS5304T -> (4, 'tower'), AS7112RD -> (12, 'rack'), FS6712X -> (12, 'flash')."""
+    name = model.upper()
+    digits = re.search(r"\d+", name)
+    bays = 0
+    if digits:
+        run = digits.group(0)
+        bays = int(run[-2:]) if len(run) >= 3 else int(run)
+    if "RD" in name:
+        kind = "rack"
+    elif name.startswith("FS"):
+        kind = "flash"
+    else:
+        kind = "tower"
+    return bays, kind
+
+
+class ModelGlyph(Gtk.Widget):
+    """Small line drawing of the NAS: a tower or rack unit with its drive
+    bays, drawn from the model number in the widget's text colour. Drawn
+    with GTK's own snapshot API, so it needs no pycairo."""
+
+    SIZE = 28
+    LINE = 1.5
+
+    def __init__(self):
+        super().__init__(valign=Gtk.Align.CENTER)
+        self.set_size_request(self.SIZE, self.SIZE)
+        self.bays, self.kind = 0, "tower"
+
+    def set_model(self, model):
+        shape = model_shape(model) if model else (0, "tower")
+        if shape != (self.bays, self.kind):
+            self.bays, self.kind = shape
+            self.queue_draw()
+
+    def do_snapshot(self, snapshot):
+        fg = self.get_color()
+        color = Gdk.RGBA()
+        color.red, color.green, color.blue, color.alpha = fg.red, fg.green, fg.blue, fg.alpha * 0.85
+        size, line = self.SIZE, self.LINE
+        if self.kind == "rack":
+            x, y, w, h = 1.0, size / 2 - 6, size - 2, 12
+            slots = min(max(self.bays, 2), 8)
+        else:
+            x, y, w, h = size / 2 - 8, 2.0, 16, size - 4
+            slots = min(max(self.bays, 1), 6)
+        outline = Gsk.RoundedRect()
+        outline.init_from_rect(Graphene.Rect().init(x, y, w, h), 3.0)
+        snapshot.append_border(outline, [line] * 4, [color] * 4)
+
+        def slot(sx, sy, sw, sh):
+            snapshot.append_color(color, Graphene.Rect().init(sx, sy, sw, sh))
+
+        if self.kind == "rack":
+            # vertical slots across the unit
+            gap = (w - 6) / slots
+            for i in range(slots):
+                slot(x + 3 + gap * i + gap / 2 - line / 2, y + 3, line, h - 6)
+        elif self.kind == "flash":
+            # 2.5" drives: short vertical slots in two columns
+            rows = max(1, (slots + 1) // 2)
+            gap = (h - 6) / rows
+            for i in range(slots):
+                slot(x + 5 + (i % 2) * 6 - line / 2, y + 3 + gap * (i // 2) + gap / 2 - 1.5, line, 3)
+        else:
+            # 3.5" drives: horizontal slots down the front
+            gap = (h - 6) / slots
+            for i in range(slots):
+                slot(x + 4, y + 3 + gap * i + gap / 2 - line / 2, w - 8, line)
 
 
 class Device(GObject.Object):
@@ -212,7 +287,7 @@ class Device(GObject.Object):
             state = f"Offline, last seen {format_seen(self.last_seen)}"
             seen = datetime.fromtimestamp(self.last_seen).strftime("%-d %b %Y %H:%M:%S")
             self.state_tip = f"Last answered a scan on {seen}"
-        parts = [state, self.ip, self.model,
+        parts = [state, self.ip,
                  f"ADM {self.adm}" if self.adm else "",
                  f"port {self.port}" if self.port else ""]
         self.details = " · ".join(p for p in parts if p)
@@ -295,7 +370,6 @@ class AccWindow(Gtk.ApplicationWindow):
         self.summary = ""
         self.view_name = "table"
         self.compact = False
-        self._table_width = 0  # widest the table measured since the last scan
         self._header_width = 0  # widest the full header bar measured so far
         self._status_timer = None
         self._rows = {}  # view -> {list item: (device, row widget)}
@@ -506,15 +580,12 @@ class AccWindow(Gtk.ApplicationWindow):
     # -- responsive layout -----------------------------------------------
     def _classify_layout(self, width):
         """Layout for the content width: (view name, compact header)."""
-        # The table keeps its cells while hidden, so its width is known in
-        # both layouts. The full header bar can only be measured while it
-        # is shown, so its width is remembered from then.
-        natural = self.view.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
-        self._table_width = max(self._table_width, natural + LAYOUT_SLACK)
+        # The full header bar can only be measured while it is shown, so
+        # its width is remembered from then.
         if not self.compact:
             minimum = self.header.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
             self._header_width = max(self._header_width, minimum + LAYOUT_SLACK)
-        return ("table" if width >= max(TABLE_WIDTH, self._table_width) else "cards",
+        return ("table" if width >= TABLE_WIDTH else "cards",
                 width < max(COMPACT_WIDTH, self._header_width))
 
     def _apply_layout(self, layout):
@@ -535,18 +606,24 @@ class AccWindow(Gtk.ApplicationWindow):
 
     # -- table cells -----------------------------------------------------
     def _setup_cell(self, _factory, item, prop):
-        label = Gtk.Label(xalign=0)
+        # Cells ellipsize so the table fits any width from TABLE_WIDTH up;
+        # the tooltip carries the full text.
+        label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
         if prop in TABULAR:
             label.add_css_class("tabular")
-        if prop != "state":
+        if prop not in ("state", "model"):
             item.set_child(label)
             return
         box = Gtk.Box(spacing=8)
-        dot = Gtk.Box(valign=Gtk.Align.CENTER)
-        dot.add_css_class("state-dot")
-        box.append(dot)
+        if prop == "model":
+            box.glyph = ModelGlyph()
+            box.append(box.glyph)
+        else:
+            box.dot = Gtk.Box(valign=Gtk.Align.CENTER)
+            box.dot.add_css_class("state-dot")
+            box.append(box.dot)
         box.append(label)
-        box.dot, box.label = dot, label
+        box.label = label
         item.set_child(box)
 
     def _bind_cell(self, _factory, item, prop):
@@ -556,9 +633,15 @@ class AccWindow(Gtk.ApplicationWindow):
         item.bindings = [dev.bind_property(prop, label, "label", flags)]
         if prop == "uptime_text":
             item.bindings.append(dev.bind_property("uptime_tip", label, "tooltip-text", flags))
-        if prop == "state":
+        elif prop == "state":
             item.bindings.append(dev.bind_property("state_tip", widget, "tooltip-text", flags))
+        else:
+            item.bindings.append(dev.bind_property(prop, label, "tooltip-text", flags))
         item.handlers = [dev.connect("notify::online", lambda *_: self._style(widget, dev))]
+        if prop == "model":
+            widget.glyph.set_model(dev.model)
+            item.handlers.append(dev.connect(
+                "notify::model", lambda *_: widget.glyph.set_model(dev.model)))
         if prop == "state":
             item.handlers.append(dev.connect("notify::state", lambda *_: self._style(widget, dev)))
         self._style(widget, dev)
@@ -567,15 +650,18 @@ class AccWindow(Gtk.ApplicationWindow):
 
     # -- cards -----------------------------------------------------------
     def _setup_card(self, _factory, item):
+        # Model (with its glyph) first, then the name, uptime on the right.
         row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         top = Gtk.Box(spacing=8)
+        row.glyph = ModelGlyph()
         row.dot = Gtk.Box(valign=Gtk.Align.CENTER)
         row.dot.add_css_class("state-dot")
+        row.model = Gtk.Label(xalign=0)
+        row.model.add_css_class("card-name")
         row.name = Gtk.Label(xalign=0, hexpand=True, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
-        row.name.add_css_class("card-name")
         row.uptime = Gtk.Label(xalign=1, valign=Gtk.Align.CENTER)
         row.uptime.add_css_class("tabular")
-        for w in (row.dot, row.name, row.uptime):
+        for w in (row.glyph, row.dot, row.model, row.name, row.uptime):
             top.append(w)
         row.details = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
         row.ids = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
@@ -587,7 +673,9 @@ class AccWindow(Gtk.ApplicationWindow):
     def _bind_card(self, _factory, item):
         dev, row = item.get_item(), item.get_child()
         flags = GObject.BindingFlags.SYNC_CREATE
+        row.glyph.set_model(dev.model)
         item.bindings = [
+            dev.bind_property("model", row.model, "label", flags),
             dev.bind_property("name", row.name, "label", flags),
             dev.bind_property("uptime_text", row.uptime, "label", flags),
             dev.bind_property("uptime_tip", row.uptime, "tooltip-text", flags),
@@ -595,7 +683,8 @@ class AccWindow(Gtk.ApplicationWindow):
             dev.bind_property("ids", row.ids, "label", flags),
         ]
         item.handlers = [dev.connect("notify::online", lambda *_: self._style(row, dev)),
-                         dev.connect("notify::state", lambda *_: self._style(row, dev))]
+                         dev.connect("notify::state", lambda *_: self._style(row, dev)),
+                         dev.connect("notify::model", lambda *_: row.glyph.set_model(dev.model))]
         self._style(row, dev)
         self._rows[self.cards][item] = (dev, row)
 
@@ -617,6 +706,9 @@ class AccWindow(Gtk.ApplicationWindow):
             target.remove_css_class("dim-label")
         else:
             target.add_css_class("dim-label")
+        glyph = getattr(widget, "glyph", None)
+        if glyph is not None:
+            glyph.set_opacity(1.0 if dev.online else 0.45)
         dot = getattr(widget, "dot", None)
         if dot is not None:
             for cls in STATE_CLASSES.values():
@@ -694,13 +786,15 @@ class AccWindow(Gtk.ApplicationWindow):
             else:
                 dev.update(data)
                 i += 1
-        for data in fresh.values():
-            self.store.append(Device(data))
+        # One splice instead of one append per device: every insert into
+        # the sorted model shifts rows and makes the views rebind, which
+        # with a few hundred devices takes seconds of main-loop time.
+        if fresh:
+            self.store.splice(self.store.get_n_items(), 0, [Device(d) for d in fresh.values()])
         self.filter.changed(Gtk.FilterChange.DIFFERENT)
         sorter = self.view.get_sorter()
         if sorter is not None:
             sorter.changed(Gtk.SorterChange.DIFFERENT)
-        self._table_width = 0  # content changed: measure the table afresh
 
     def _auto_scan(self):
         if self.auto_refresh and not self.scanning:
