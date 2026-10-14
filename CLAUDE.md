@@ -37,7 +37,11 @@ a GTK4/PyGObject GUI (`gui/acc-gui.py`) that drives the CLI through
 
 - No cgo and no new Go dependencies without a strong reason: the CLI must
   stay a single static binary.
-- The version lives in git tags only; `main.version` is set by ldflags.
+- The version lives in git tags only; `main.version` is set by ldflags
+  and `GUI_VERSION` in `gui/acc-gui.py` is stamped by `sed` at packaging
+  time (release.yml, PKGBUILD). A release is made by running the
+  release workflow manually with the version as input (it creates the
+  tag) or by pushing a `v*` tag.
 - Commits are authored by the repository owner (`git config user.name
   "Frank Eckardt"`, `user.email frank@takindo.com`), never by a Claude
   identity, and are NOT signed from a Claude session (commit and tag
