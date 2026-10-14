@@ -104,6 +104,31 @@ STATE_CLASSES = {
 SHARES_HINT = ("no application handles smb:// links; install gvfs-smb (GNOME, Cinnamon, "
                "XFCE) or kio-extras (KDE), or open the address in your file manager")
 
+# File managers that browse smb:// on their own, by desktop (an entry of
+# XDG_CURRENT_DESKTOP). Most of them register no handler for the smb
+# scheme, so the desktop's default-app lookup finds nothing even though
+# the file manager would open the address fine when started with it.
+FILE_MANAGERS = [
+    ("GNOME", "nautilus"), ("ubuntu", "nautilus"), ("Budgie", "nautilus"),
+    ("Unity", "nautilus"), ("KDE", "dolphin"), ("XFCE", "thunar"),
+    ("X-Cinnamon", "nemo"), ("MATE", "caja"), ("LXQt", "pcmanfm-qt"),
+    ("LXDE", "pcmanfm"), ("Pantheon", "io.elementary.files"),
+    ("Deepin", "dde-file-manager"),
+]
+LAUNCH_WAIT = 3  # seconds a launcher gets to fail before it counts as started
+
+
+def file_managers():
+    """Installed file managers that can show smb://, the running desktop's
+    own first."""
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower().split(":")
+    ranked = sorted(FILE_MANAGERS, key=lambda d: d[0].lower() not in desktop)
+    found = []
+    for _desk, fm in ranked:
+        if fm not in found and shutil.which(fm):
+            found.append(fm)
+    return found
+
 # Link to the model's compatibility list on asustor.com. Without an exact
 # address scheme the default goes through DuckDuckGo's "I'm feeling ducky"
 # redirect to the first asustor.com hit; ~/.config/asustor-acc/links.json
@@ -147,6 +172,8 @@ CSS = """
 .state-dot.notready { background: #e5a50a; }
 .state-dot.offline { background: #9a9996; }
 columnview > listview > row > cell { padding: 7px 8px; }
+/* The last column stays clear of the overlay scrollbar. */
+columnview > listview > row > cell:last-child { padding-right: 24px; }
 listview.cards > row { padding: 8px 12px; }
 .card-name { font-weight: bold; }
 .tabular { font-variant-numeric: tabular-nums; }
@@ -307,7 +334,11 @@ class Device(GObject.Object):
 
     @property
     def shares_url(self):
-        return self.data.get("shares_url") or ""
+        url = self.data.get("shares_url") or ""
+        ip = self.data.get("ip") or ""
+        if not url and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", ip):
+            url = f"smb://{ip}/"  # an older acc without the field
+        return url
 
     @property
     def initialized(self):
@@ -660,7 +691,8 @@ class AccWindow(Gtk.ApplicationWindow):
         # widths where every column fits, and the cards wrap their text.
         never = Gtk.PolicyType.NEVER
         self.stack = Gtk.Stack(vexpand=True, hhomogeneous=False)
-        self.stack.add_named(Gtk.ScrolledWindow(child=self.view, hscrollbar_policy=never), "table")
+        self.table_page = Gtk.ScrolledWindow(child=self.view, hscrollbar_policy=never)
+        self.stack.add_named(self.table_page, "table")
         self.stack.add_named(Gtk.ScrolledWindow(child=self.cards, hscrollbar_policy=never), "cards")
         self.stack.add_named(self._build_empty_page(), "empty")
 
@@ -719,10 +751,11 @@ class AccWindow(Gtk.ApplicationWindow):
         if not self.compact:
             minimum = self.header.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
             self._header_width = max(self._header_width, minimum + LAYOUT_SLACK)
-        # The table's own minimum (long model names, a large font) can be
-        # more than TABLE_WIDTH; measured, so its last column is never cut
-        # off but the cards take over instead.
-        minimum = self.view.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+        # The table's own minimum (long model names, a large font, a
+        # scrollbar that is not an overlay) can be more than TABLE_WIDTH;
+        # measured, so its last column is never cut off but the cards take
+        # over instead.
+        minimum = self.table_page.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
         self._table_width = max(self._table_width, minimum + LAYOUT_SLACK)
         return ("table" if width >= max(TABLE_WIDTH, self._table_width) else "cards",
                 width < max(COMPACT_WIDTH, self._header_width))
@@ -1098,22 +1131,52 @@ class AccWindow(Gtk.ApplicationWindow):
         menu.popup()
 
     def _launch(self, uri):
-        """Open uri with the desktop's handler; xdg-open is the fallback for
-        desktops GIO does not know (KDE handles smb:// through kde-open)."""
+        """Open uri with the desktop's registered handler. When there is
+        none (usual for smb://: file managers register no handler for the
+        scheme), the running desktop's file manager is started with the
+        address, then any other installed one, then xdg-open. A launcher
+        that exits with an error within LAUNCH_WAIT counts as failed and
+        the next one is tried; if all fail the address is put on the
+        clipboard so it can be pasted into a location bar."""
         try:
             Gio.AppInfo.launch_default_for_uri(uri, None)
             return
         except GLib.Error as exc:
             reason = exc.message
-        try:
-            subprocess.Popen(["xdg-open", uri], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
-            return
-        except OSError:
-            pass
+        commands = []
         if uri.startswith("smb://"):
-            reason = SHARES_HINT
-        self.set_status(f"Could not open {uri}: {reason}", sticky=True)
+            commands += [[fm, uri] for fm in file_managers()]
+        commands.append(["xdg-open", uri])
+
+        def worker(reason):
+            for cmd in commands:
+                try:
+                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+                except OSError as exc:
+                    reason = f"{cmd[0]}: {exc.strerror or exc}"
+                    continue
+                try:
+                    code = proc.wait(timeout=LAUNCH_WAIT)
+                except subprocess.TimeoutExpired:
+                    code = 0  # still running: it has a window up
+                if code == 0:
+                    GLib.idle_add(lambda: self.set_status(f"Opened {uri} with {cmd[0]}") and False)
+                    return
+                reason = f"{cmd[0]} exited with status {code}"
+            GLib.idle_add(lambda: self._launch_failed(uri, reason) and False)
+
+        self.set_status(f"Opening {uri}…")
+        threading.Thread(target=worker, args=(reason,), daemon=True).start()
+
+    def _launch_failed(self, uri, reason):
+        provider = Gdk.ContentProvider.new_for_bytes(
+            "text/plain;charset=utf-8", GLib.Bytes.new(uri.encode()))
+        self.get_clipboard().set_content(provider)
+        hint = SHARES_HINT if uri.startswith("smb://") else "no application handles the address"
+        self.set_status(f"Could not open {uri} ({reason}): {hint}. The address is on the "
+                        "clipboard: paste it into the file manager's location bar (Ctrl+L).",
+                        sticky=True)
 
     def _open(self, dev):
         if dev is None:
@@ -1301,6 +1364,7 @@ class AccWindow(Gtk.ApplicationWindow):
 
     def set_status(self, text, sticky=False):
         self.status.set_text(text)
+        self.status.set_tooltip_text(text)  # the label shows three lines at most
         if self._status_timer:
             GLib.source_remove(self._status_timer)
             self._status_timer = None

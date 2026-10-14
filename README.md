@@ -219,9 +219,16 @@ copy from an earlier `install` to `/usr/local/bin` is started before a
 packaged one in `/usr/bin`: `which -a acc acc-gui` lists every copy,
 remove the old ones.
 
-"Open shared folders" hands `smb://<ip>/` to your file manager; it needs
-the SMB backend of your desktop (`gvfs-smb` on GNOME, Cinnamon and XFCE,
-`kio-extras` on KDE), which the packages recommend.
+"Open shared folders" (and `acc shares`) opens `smb://<ip>/` in your file
+manager: through the desktop's registered handler when there is one,
+otherwise by starting the running desktop's file manager (Nautilus,
+Dolphin, Thunar, Nemo, Caja, PCManFM, elementary Files, Deepin) with the
+address, then any other installed one, then `xdg-open`. Browsing the
+share needs the SMB backend of your desktop (`gvfs-smb` on GNOME,
+Cinnamon and XFCE, `kio-extras` on KDE), which the packages recommend.
+When nothing can open it, the status bar says why and the address is on
+the clipboard, ready to paste into the file manager's location bar
+(Ctrl+L).
 
 ## Links to asustor.com
 

@@ -151,13 +151,86 @@ func watchScan(timeout, interval time.Duration, all, asJSON bool) {
 	}
 }
 
-// xdgOpen hands url to the desktop's default handler; what names the
-// kind of program expected, for the error message.
-func xdgOpen(url, what string) error {
-	if err := exec.Command("xdg-open", url).Start(); err != nil {
-		return fmt.Errorf("cannot start a %s (%w); open %s yourself", what, err, url)
+// launchWait is how long a launcher gets to exit with an error before it
+// counts as started (a file manager that is up keeps running).
+const launchWait = 3 * time.Second
+
+// fileManagers lists file managers that browse smb:// on their own, by
+// desktop (an entry of XDG_CURRENT_DESKTOP). Most register no handler for
+// the smb scheme, so xdg-open finds nothing although the file manager
+// opens the address fine when started with it.
+var fileManagers = []struct{ desktop, command string }{
+	{"GNOME", "nautilus"}, {"ubuntu", "nautilus"}, {"Budgie", "nautilus"},
+	{"Unity", "nautilus"}, {"KDE", "dolphin"}, {"XFCE", "thunar"},
+	{"X-Cinnamon", "nemo"}, {"MATE", "caja"}, {"LXQt", "pcmanfm-qt"},
+	{"LXDE", "pcmanfm"}, {"Pantheon", "io.elementary.files"},
+	{"Deepin", "dde-file-manager"},
+}
+
+// installedFileManagers returns the file managers found on PATH, the
+// running desktop's own first. installed is exec.LookPath in production.
+func installedFileManagers(desktop string, installed func(string) (string, error)) []string {
+	current := map[string]bool{}
+	for _, d := range strings.Split(strings.ToLower(desktop), ":") {
+		current[d] = true
 	}
-	return nil
+	var own, others []string
+	seen := map[string]bool{}
+	for _, fm := range fileManagers {
+		if seen[fm.command] {
+			continue
+		}
+		if _, err := installed(fm.command); err != nil {
+			continue
+		}
+		seen[fm.command] = true
+		if current[strings.ToLower(fm.desktop)] {
+			own = append(own, fm.command)
+		} else {
+			others = append(others, fm.command)
+		}
+	}
+	return append(own, others...)
+}
+
+// openURL hands url to the desktop: xdg-open first and, for smb://, the
+// installed file managers after it. A launcher that exits with an error
+// within launchWait has failed and the next one is tried. what names the
+// kind of program expected, for the error message.
+func openURL(url, what string) error {
+	commands := [][]string{{"xdg-open", url}}
+	if strings.HasPrefix(url, "smb://") {
+		for _, fm := range installedFileManagers(os.Getenv("XDG_CURRENT_DESKTOP"), exec.LookPath) {
+			commands = append(commands, []string{fm, url})
+		}
+	}
+	var lastErr error
+	for _, c := range commands {
+		cmd := exec.Command(c[0], c[1:]...)
+		if err := cmd.Start(); err != nil {
+			lastErr = err
+			continue
+		}
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case err := <-done:
+			if err == nil {
+				vlog("opened %s with %s", url, c[0])
+				return nil
+			}
+			lastErr = fmt.Errorf("%s: %w", c[0], err)
+			vlog("%v", lastErr)
+		case <-time.After(launchWait):
+			vlog("opened %s with %s", url, c[0])
+			return nil // still running: it has a window up
+		}
+	}
+	hint := ""
+	if strings.HasPrefix(url, "smb://") {
+		hint = "; install gvfs-smb (GNOME, Cinnamon, XFCE) or kio-extras (KDE)"
+	}
+	return fmt.Errorf("cannot start a %s (%v)%s; open %s yourself", what, lastErr, hint, url)
 }
 
 // maxSeconds bounds --timeout and --interval; beyond it the value would
@@ -329,7 +402,7 @@ func main() {
 			fail(fmt.Errorf("%s is not answering (last seen %s); wake it with 'acc wol %s'",
 				nas.Name, formatSeen(nas.LastSeen, time.Now()), nas.Name))
 		}
-		if err := xdgOpen(url, what); err != nil {
+		if err := openURL(url, what); err != nil {
 			fail(err)
 		}
 	case "wol":
