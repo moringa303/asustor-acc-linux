@@ -23,7 +23,11 @@ func doctor(timeout time.Duration) {
 	fmt.Println("acc doctor: mDNS discovery health check")
 	fmt.Println()
 
-	ifaces, _ := net.Interfaces()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		fmt.Printf("RESULT: cannot list network interfaces: %v\n", err)
+		return
+	}
 	var candidates []net.Interface
 	fmt.Println("Network interfaces:")
 	for _, ifc := range ifaces {
@@ -88,7 +92,12 @@ func doctor(timeout time.Duration) {
 		mdnsQuery("_ASUSTOR_INIT._tcp.local"),
 	}
 	for _, q := range queries {
-		pconn.WriteTo(q, dst)
+		// A query that cannot even leave would make "no traffic at all"
+		// below point at the wrong culprit.
+		if _, err := pconn.WriteTo(q, dst); err != nil {
+			fmt.Printf("  warning: cannot send mDNS query: %v\n", err)
+			break
+		}
 	}
 	// Re-send once mid-listen; mDNS responders may rate-limit.
 	go func() {

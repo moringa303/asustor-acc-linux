@@ -21,11 +21,19 @@ const recheckTimeout = 2 * time.Second
 // device memory. The returned list holds the devices that answered first,
 // then remembered devices that did not (Online == false).
 func scan(timeout time.Duration) ([]Nas, error) {
+	known := loadMemory()
+	// Remembered devices are asked for their uptime while discovery
+	// listens, so SNMP adds no time to the scan unless a NAS is new.
+	probe := newUptimeProbe()
+	answeredSNMP := map[string]bool{}
+	for _, k := range known {
+		answeredSNMP[k.key()] = k.SNMP
+		probe.ask(k.IP, k.SNMP)
+	}
 	found, err := discover(timeout)
 	if err != nil {
 		return nil, err
 	}
-	known := loadMemory()
 	if missing := missingSince(known, found); len(missing) > 0 {
 		vlog("no answer from %s, looking again for %s", strings.Join(missing, ", "), recheckTimeout)
 		again, _ := discover(recheckTimeout)
@@ -38,6 +46,10 @@ func scan(timeout time.Duration) ([]Nas, error) {
 		}
 		found = sortedByName(byKey)
 	}
+	for _, n := range found {
+		probe.ask(n.IP, answeredSNMP[n.key()])
+	}
+	probe.apply(found)
 	return remember(known, found, time.Now()), nil
 }
 

@@ -58,7 +58,10 @@ func sendWOL(mac, ip string) ([]string, error) {
 // broadcastAddrs lists the IPv4 directed broadcast address of every
 // interface that is up and not loopback (only --iface when set).
 func broadcastAddrs() []string {
-	ifaces, _ := net.Interfaces()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		vlog("cannot list interfaces: %v", err)
+	}
 	var out []string
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 ||
@@ -68,26 +71,39 @@ func broadcastAddrs() []string {
 		if ifaceName != "" && ifc.Name != ifaceName {
 			continue
 		}
-		addrs, _ := ifc.Addrs()
-		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip4 := ipnet.IP.To4()
-			mask := ipnet.Mask
-			if len(mask) == net.IPv6len {
-				mask = mask[12:]
-			}
-			if ip4 == nil || len(mask) != net.IPv4len {
-				continue
-			}
-			bcast := make(net.IP, net.IPv4len)
-			for i := range bcast {
-				bcast[i] = ip4[i] | ^mask[i]
-			}
-			out = append(out, bcast.String())
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			vlog("addresses of %s: %v", ifc.Name, err)
+			continue
 		}
+		out = append(out, broadcastsOf(addrs)...)
+	}
+	return out
+}
+
+// broadcastsOf computes the directed broadcast address of every IPv4
+// network among addrs; other addresses are skipped.
+func broadcastsOf(addrs []net.Addr) []string {
+	var out []string
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip4 := ipnet.IP.To4()
+		mask := ipnet.Mask
+		// A 16-byte mask of an IPv4-mapped address: only the tail counts.
+		if len(mask) == net.IPv6len {
+			mask = mask[12:]
+		}
+		if ip4 == nil || len(mask) != net.IPv4len {
+			continue
+		}
+		bcast := make(net.IP, net.IPv4len)
+		for i := range bcast {
+			bcast[i] = ip4[i] | ^mask[i]
+		}
+		out = append(out, bcast.String())
 	}
 	return out
 }

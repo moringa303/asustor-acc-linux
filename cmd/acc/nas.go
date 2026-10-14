@@ -25,17 +25,25 @@ type Nas struct {
 	ADMUpdate    string `json:"adm_update,omitempty"`
 	Initialized  bool   `json:"initialized"`
 	// URL of the ADM web UI (or of the setup wizard for an uninitialized
-	// NAS), derived from the fields above.
-	URL string `json:"url"`
+	// NAS), derived from the fields above, and of the shared folders
+	// (smb://<ip>/) when an IPv4 address is known.
+	URL       string `json:"url"`
+	SharesURL string `json:"shares_url,omitempty"`
 
 	// Presence, maintained by the device memory (cache.go). Online is true
-	// when the NAS answered the scan that produced this record. OnlineSince
-	// is when the current run of consecutive scans that saw the NAS began;
-	// this is what acc has observed, not the uptime of the NAS, which the
-	// discovery protocol does not expose.
-	Online      bool      `json:"online"`
-	OnlineSince time.Time `json:"online_since"`
-	LastSeen    time.Time `json:"last_seen"`
+	// when the NAS answered the scan that produced this record.
+	Online   bool      `json:"online"`
+	LastSeen time.Time `json:"last_seen"`
+
+	// Uptime as the NAS reports it over SNMP (hrSystemUptime, or
+	// sysUpTime when the host MIB is missing); the discovery protocol
+	// does not carry it. UptimeSeconds is present only when the NAS
+	// answered this scan, and UptimeSource is "snmp" exactly then. SNMP
+	// remembers across scans that the NAS has answered SNMP at all, which
+	// decides how patiently the next scan asks it.
+	UptimeSeconds *int64 `json:"uptime_seconds,omitempty"`
+	UptimeSource  string `json:"uptime_source,omitempty"`
+	SNMP          bool   `json:"snmp,omitempty"`
 }
 
 func (n *Nas) applyTxt(txt []string) {
@@ -126,20 +134,26 @@ func (n *Nas) webURL() string {
 	if host == "" {
 		return ""
 	}
-	// An uninitialized NAS serves its setup wizard over plain HTTP,
-	// normally on port 8000.
-	if !n.Initialized {
-		port := n.Port
-		if port == 0 {
-			port = 8000
-		}
-		return fmt.Sprintf("http://%s:%d/", host, port)
+	// ADM's default web port, also where an uninitialized NAS serves its
+	// setup wizard over plain HTTP; used when the SRV record gave none.
+	port := n.Port
+	if port == 0 {
+		port = 8000
 	}
-	// Prefer plain HTTP on the SRV port unless it is disabled.
-	if strings.EqualFold(n.HTTPEnabled, "No") && n.HTTPSPort != "" {
+	if n.Initialized && strings.EqualFold(n.HTTPEnabled, "No") && n.HTTPSPort != "" {
+		// Plain HTTP is preferred on the SRV port unless it is disabled.
 		return fmt.Sprintf("https://%s:%s/", host, n.HTTPSPort)
 	}
-	return fmt.Sprintf("http://%s:%d/", host, n.Port)
+	return fmt.Sprintf("http://%s:%d/", host, port)
+}
+
+// sharesURL is where a file manager should go for the shared folders of
+// this NAS, or "" without an IPv4 address.
+func (n *Nas) sharesURL() string {
+	if ip := net.ParseIP(n.IP); ip == nil || ip.To4() == nil {
+		return ""
+	}
+	return "smb://" + n.IP + "/"
 }
 
 // mergeNas records n in found, keyed by identity. When the same NAS was
