@@ -1,4 +1,4 @@
-# Asustor ACC for Linux
+# Asustor Control Center for Linux
 
 Unofficial Linux version of the ASUSTOR Control Center: ASUSTOR NAS
 discovery over mDNS, ADM launcher, Wake-on-LAN. A Go CLI (`cmd/acc`) plus

@@ -1,8 +1,8 @@
 # Maintainer: your name <you@example.com>
-# AUR package for Asustor ACC for Linux. Update url/source after publishing
+# AUR package for Asustor Control Center for Linux. Update url/source after publishing
 # the GitHub repository, then run updpkgsums.
 pkgname=asustor-acc-linux
-pkgver=1.4.7
+pkgver=1.5.0
 pkgrel=1
 pkgdesc="Unofficial Linux version of ASUSTOR Control Center (NAS discovery, ADM launcher, WOL)"
 arch=(x86_64)
@@ -10,7 +10,8 @@ url="https://github.com/moringa303/asustor-acc-linux"
 license=(MIT)
 depends=(gtk4 python-gobject xdg-utils)
 optdepends=('gvfs-smb: open shared folders from GNOME, Cinnamon and XFCE file managers'
-            'kio-extras: open shared folders from Dolphin')
+            'kio-extras: open shared folders from Dolphin'
+            'webkitgtk-6.0: open the compatibility list inside the app instead of the browser')
 makedepends=(go)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')

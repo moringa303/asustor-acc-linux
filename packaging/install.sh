@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs Asustor ACC for Linux to /usr/local and pulls GUI dependencies
+# Installs Asustor Control Center for Linux to /usr/local and pulls GUI dependencies
 # with your distro's package manager. Run from an extracted release tarball
 # (expects usr/bin/acc, usr/bin/acc-gui next to this script) or after
 # `go build -o usr/bin/acc ./cmd/acc` in a source checkout.
@@ -7,13 +7,13 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 if command -v pacman >/dev/null; then
-    sudo pacman -S --needed --noconfirm gtk4 python-gobject xdg-utils
+    sudo pacman -S --needed --noconfirm gtk4 python-gobject xdg-utils webkitgtk-6.0
 elif command -v apt-get >/dev/null; then
-    sudo apt-get install -y python3-gi gir1.2-gtk-4.0 xdg-utils
+    sudo apt-get install -y python3-gi gir1.2-gtk-4.0 xdg-utils gir1.2-webkit-6.0
 elif command -v dnf >/dev/null; then
-    sudo dnf install -y python3-gobject gtk4 xdg-utils
+    sudo dnf install -y python3-gobject gtk4 xdg-utils webkitgtk6.0
 else
-    echo "Unknown distro: install GTK4 + PyGObject + xdg-utils manually." >&2
+    echo "Unknown distro: install GTK4 + PyGObject + xdg-utils (+ WebKitGTK 6.0 bindings) manually." >&2
 fi
 
 sudo install -Dm755 usr/bin/acc /usr/local/bin/acc

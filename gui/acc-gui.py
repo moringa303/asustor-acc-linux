@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GTK4 GUI of Asustor ACC for Linux.
+"""GTK4 GUI of Asustor Control Center for Linux.
 
 Discovery, Wake-on-LAN and the device memory live in the bundled `acc`
 binary; this window presents its results like the Control Center device
@@ -31,6 +31,16 @@ try:
 except (ValueError, ImportError):
     Adw = None
 
+# WebKitGTK is optional too: with it the compatibility list opens in a
+# window of the app, without it in the browser.
+try:
+    gi.require_version("WebKit", "6.0")
+    from gi.repository import WebKit  # noqa: E402
+except (ValueError, ImportError):
+    WebKit = None
+WEBKIT_HINT = ("install the WebKitGTK bindings to open it inside the app: gir1.2-webkit-6.0 "
+               "(Debian, Ubuntu), webkitgtk6.0 (Fedora), webkitgtk-6.0 (Arch)")
+
 
 def _find_acc():
     override = os.environ.get("ACC_BIN")
@@ -48,9 +58,15 @@ ACC_PATH = shutil.which(ACC_BIN) or ACC_BIN
 # Stamped by the packaging (release workflow, PKGBUILD); "dev" in a checkout.
 GUI_VERSION = "dev"
 
+APP_NAME = "Asustor Control Center"
+APP_FULL_NAME = f"{APP_NAME} for Linux"
 # Must match the installed .desktop file name and the hicolor icon name,
 # or GNOME shows a generic gear icon for the window.
 APP_ID = "io.github.moringa303.AsustorAcc"
+# The accent colour: kiwi green. KIWI is the fill (dark text on it),
+# KIWI_DEEP the same green for small marks on a light background.
+KIWI = "#9EE12F"
+KIWI_DEEP = "#86CC1E"
 WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
 
 SCAN_TIMEOUT = 6  # seconds acc listens for answers
@@ -165,21 +181,39 @@ def model_links(model):
     compat = override.get("compat") or templates["compat"].format(model=base, media=media)
     return compat, media
 
-CSS = """
-.state-dot { min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }
-.state-dot.ready { background: #2ec27e; }
-.state-dot.uninitialized { background: #3584e4; }
-.state-dot.notready { background: #e5a50a; }
-.state-dot.offline { background: #9a9996; }
-columnview > listview > row > cell { padding: 7px 8px; }
+CSS = f"""
+.state-dot {{ min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }}
+.state-dot.ready {{ background: {KIWI_DEEP}; }}
+.state-dot.uninitialized {{ background: #3584e4; }}
+.state-dot.notready {{ background: #e5a50a; }}
+.state-dot.offline {{ background: #9a9996; }}
+columnview > listview > row > cell {{ padding: 7px 8px; }}
 /* The last column stays clear of the overlay scrollbar. */
-columnview > listview > row > cell:last-child { padding-right: 24px; }
-listview.cards > row { padding: 8px 12px; }
-.card-name { font-weight: bold; }
-.tabular { font-variant-numeric: tabular-nums; }
-.empty-title { font-size: 1.4em; font-weight: bold; }
-.statusbar { padding: 6px 12px; }
+columnview > listview > row > cell:last-child {{ padding-right: 24px; }}
+listview.cards > row {{ padding: 8px 12px; }}
+.card-name {{ font-weight: bold; }}
+.tabular {{ font-variant-numeric: tabular-nums; }}
+.empty-title {{ font-size: 1.4em; font-weight: bold; }}
+.statusbar {{ padding: 6px 12px; }}
+/* Kiwi green accents: the stripe under the header bar, the "for Linux"
+   pill of the title, the main action button, the empty page's icon. */
+.kiwi-stripe {{ min-height: 3px; background: {KIWI}; }}
+.pill {{ background: {KIWI}; color: #15200a; border-radius: 999px; padding: 1px 8px;
+         font-size: 0.72em; font-weight: bold; }}
+button.kiwi {{ background-color: {KIWI}; background-image: none; color: #15200a; }}
+button.kiwi:hover {{ background-color: #b3ea55; }}
+button.kiwi:active, button.kiwi:checked {{ background-color: {KIWI_DEEP}; }}
+button.kiwi:disabled {{ background-color: alpha({KIWI}, 0.35); color: alpha(#15200a, 0.5); }}
+.kiwi-icon {{ color: {KIWI_DEEP}; }}
+progressbar.kiwi trough {{ min-height: 3px; border: none; border-radius: 0; background: alpha({KIWI}, 0.25); }}
+progressbar.kiwi progress {{ min-height: 3px; border: none; border-radius: 0; background: {KIWI}; }}
 """
+
+
+def kiwi_stripe():
+    stripe = Gtk.Box()
+    stripe.add_css_class("kiwi-stripe")
+    return stripe
 
 
 def _parse_time(value):
@@ -237,11 +271,13 @@ class ModelGlyph(Gtk.Widget):
 
     SIZE = 28
     LINE = 1.5
+    LED = 3  # the power LED, kiwi green while the NAS is online
 
     def __init__(self):
         super().__init__(valign=Gtk.Align.CENTER)
         self.set_size_request(self.SIZE, self.SIZE)
         self.bays, self.kind = 0, "tower"
+        self.lit = False
 
     def set_model(self, model):
         shape = model_shape(model) if model else (0, "tower")
@@ -249,11 +285,16 @@ class ModelGlyph(Gtk.Widget):
             self.bays, self.kind = shape
             self.queue_draw()
 
+    def set_lit(self, lit):
+        if lit != self.lit:
+            self.lit = lit
+            self.queue_draw()
+
     def do_snapshot(self, snapshot):
         fg = self.get_color()
         color = Gdk.RGBA()
         color.red, color.green, color.blue, color.alpha = fg.red, fg.green, fg.blue, fg.alpha * 0.85
-        size, line = self.SIZE, self.LINE
+        size, line, led = self.SIZE, self.LINE, self.LED
         if self.kind == "rack":
             x, y, w, h = 1.0, size / 2 - 6, size - 2, 12
             slots = min(max(self.bays, 2), 8)
@@ -267,22 +308,30 @@ class ModelGlyph(Gtk.Widget):
         def slot(sx, sy, sw, sh):
             snapshot.append_color(color, Graphene.Rect().init(sx, sy, sw, sh))
 
+        # The right-hand edge is kept for the LED.
         if self.kind == "rack":
             # vertical slots across the unit
-            gap = (w - 6) / slots
+            gap = (w - 6 - led - 2) / slots
             for i in range(slots):
                 slot(x + 3 + gap * i + gap / 2 - line / 2, y + 3, line, h - 6)
+            led_x, led_y = x + w - 3 - led, y + h / 2 - led / 2
         elif self.kind == "flash":
             # 2.5" drives: short vertical slots in two columns
             rows = max(1, (slots + 1) // 2)
             gap = (h - 6) / rows
             for i in range(slots):
-                slot(x + 5 + (i % 2) * 6 - line / 2, y + 3 + gap * (i // 2) + gap / 2 - 1.5, line, 3)
+                slot(x + 4 + (i % 2) * 4.5 - line / 2, y + 3 + gap * (i // 2) + gap / 2 - 1.5, line, 3)
+            led_x, led_y = x + w - 3 - led, y + h - 3 - led
         else:
             # 3.5" drives: horizontal slots down the front
             gap = (h - 6) / slots
             for i in range(slots):
-                slot(x + 4, y + 3 + gap * i + gap / 2 - line / 2, w - 8, line)
+                slot(x + 4, y + 3 + gap * i + gap / 2 - line / 2, w - 8 - led - 1, line)
+            led_x, led_y = x + w - 3 - led, y + h - 3 - led
+        if self.lit:
+            kiwi = Gdk.RGBA()
+            kiwi.parse(KIWI_DEEP)
+            snapshot.append_color(kiwi, Graphene.Rect().init(led_x, led_y, led, led))
 
 
 class Device(GObject.Object):
@@ -465,7 +514,7 @@ class ContentBox(Gtk.Box):
 
 class AccWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Asustor ACC for Linux")
+        super().__init__(application=app, title=APP_FULL_NAME)
         self.set_icon_name(APP_ID)
         self.set_default_size(1100, 560)
         self.set_size_request(MIN_WIDTH, 300)
@@ -549,11 +598,16 @@ class AccWindow(Gtk.ApplicationWindow):
         header.pack_start(self.search_btn)
 
         self.titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
-        title = Gtk.Label(label="Asustor ACC")
+        title_row = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
+        title = Gtk.Label(label=APP_NAME)
         title.add_css_class("title")
+        pill = Gtk.Label(label="for Linux", valign=Gtk.Align.CENTER)
+        pill.add_css_class("pill")
+        title_row.append(title)
+        title_row.append(pill)
         self.subtitle = Gtk.Label()
         self.subtitle.add_css_class("subtitle")
-        self.titles.append(title)
+        self.titles.append(title_row)
         self.titles.append(self.subtitle)
         header.set_title_widget(self.titles)
         self._show_summary("Scanning the local network…")
@@ -575,14 +629,14 @@ class AccWindow(Gtk.ApplicationWindow):
         section.append("Forget offline devices", "win.forget-offline")
         menu.append_section(None, section)
         section = Gio.Menu()
-        section.append("About Asustor ACC", "win.about")
+        section.append(f"About {APP_NAME}", "win.about")
         menu.append_section(None, section)
         menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True)
         menu_btn.set_tooltip_text("Menu (F10)")
         header.pack_end(menu_btn)
 
         self.open_btn = Gtk.Button(label="Open ADM", action_name="win.open")
-        self.open_btn.add_css_class("suggested-action")
+        self.open_btn.add_css_class("kiwi")
         self.open_btn.set_tooltip_text("Open the web interface of the selected NAS (Ctrl+O)")
         header.pack_end(self.open_btn)
         self.wake_btn = Gtk.Button(label="Wake", action_name="win.wake")
@@ -715,6 +769,7 @@ class AccWindow(Gtk.ApplicationWindow):
                                       | GObject.BindingFlags.SYNC_CREATE)
 
         box = ContentBox(self._classify_layout, self._apply_layout)
+        box.append(kiwi_stripe())
         box.append(self.search_bar)
         box.append(self.stack)
         box.append(Gtk.Separator())
@@ -728,7 +783,7 @@ class AccWindow(Gtk.ApplicationWindow):
                        margin_start=24, margin_end=24)
         icon = Gtk.Image.new_from_icon_name("network-server-symbolic")
         icon.set_pixel_size(96)
-        icon.add_css_class("dim-label")
+        icon.add_css_class("kiwi-icon")
         self.empty_title = Gtk.Label(label="No ASUSTOR NAS found", wrap=True,
                                      justify=Gtk.Justification.CENTER)
         self.empty_title.add_css_class("empty-title")
@@ -736,7 +791,7 @@ class AccWindow(Gtk.ApplicationWindow):
         self.empty_text.add_css_class("dim-label")
         buttons = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER, margin_top=12)
         again = Gtk.Button(label="Scan again", action_name="win.scan")
-        again.add_css_class("suggested-action")
+        again.add_css_class("kiwi")
         buttons.append(again)
         buttons.append(Gtk.Button(label="Diagnose discovery…", action_name="win.doctor"))
         for w in (icon, self.empty_title, self.empty_text, buttons):
@@ -889,6 +944,7 @@ class AccWindow(Gtk.ApplicationWindow):
         glyph = getattr(widget, "glyph", None)
         if glyph is not None:
             glyph.set_opacity(1.0 if dev.online else 0.45)
+            glyph.set_lit(dev.online)
         dot = getattr(widget, "dot", None)
         if dot is not None:
             for cls in STATE_CLASSES.values():
@@ -1220,8 +1276,13 @@ class AccWindow(Gtk.ApplicationWindow):
         if dev is None or not dev.model:
             return
         compat, media = model_links(dev.model)
-        self.set_status(f"Opening the {media} compatibility list for {dev.model}…")
-        self._launch(compat)
+        title = f"{dev.model} {media} compatibility list"
+        if WebKit is None:
+            self.set_status(f"Opening the {title} in the browser ({WEBKIT_HINT})…")
+            self._launch(compat)
+            return
+        self.set_status(f"Opening the {title}…")
+        WebWindow(self, compat, title).present()
 
     def ping_selected(self):
         dev = self.selected()
@@ -1320,7 +1381,7 @@ class AccWindow(Gtk.ApplicationWindow):
     def show_about(self):
         about = Gtk.AboutDialog(
             transient_for=self, modal=True,
-            program_name="Asustor ACC for Linux",
+            program_name=APP_FULL_NAME,
             version=GUI_VERSION if GUI_VERSION != "dev" else (self.acc_version or "dev"),
             comments="Unofficial Linux version of the ASUSTOR Control Center: "
                      "NAS discovery, ADM launcher and Wake-on-LAN.\n\n"
@@ -1370,6 +1431,103 @@ class AccWindow(Gtk.ApplicationWindow):
             self._status_timer = None
         if not sticky:
             self._status_timer = GLib.timeout_add_seconds(8, self._set_hint)
+
+
+class WebWindow(Gtk.Window):
+    """A page of asustor.com inside the app: back, forward and reload
+    buttons, the address under the title, a button that hands the page to
+    the browser, and a kiwi progress stripe. Works down to MIN_WIDTH: the
+    buttons are icons and the title shortens."""
+
+    def __init__(self, parent, url, title):
+        super().__init__(title=title, application=parent.get_application(),
+                         default_width=1000, default_height=720)
+        self.set_size_request(MIN_WIDTH, 300)
+        self.set_icon_name(APP_ID)
+        self.start_title = title
+        self.web = WebKit.WebView(hexpand=True, vexpand=True)
+        self.web.connect("create", self._create)
+        self.web.connect("notify::uri", lambda *_: self._update())
+        self.web.connect("notify::title", lambda *_: self._update())
+        self.web.connect("notify::estimated-load-progress", lambda *_: self._progress())
+        self.web.connect("load-changed", self._load_changed)
+        self.web.connect("load-failed", self._load_failed)
+
+        header = Gtk.HeaderBar()
+        self.set_titlebar(header)
+        for icon, tip, action in (("go-previous-symbolic", "Back (Alt+Left)", self.web.go_back),
+                                  ("go-next-symbolic", "Forward (Alt+Right)", self.web.go_forward),
+                                  ("view-refresh-symbolic", "Reload (F5)", self.web.reload)):
+            btn = Gtk.Button(icon_name=icon, tooltip_text=tip)
+            btn.connect("clicked", lambda _b, action=action: action())
+            header.pack_start(btn)
+        browser = Gtk.Button(icon_name="web-browser-symbolic",
+                             tooltip_text="Open this page in the browser")
+        browser.connect("clicked", lambda *_: parent._launch(self.web.get_uri() or url))
+        header.pack_end(browser)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        self.title_label = Gtk.Label(label=title, ellipsize=Pango.EllipsizeMode.END)
+        self.title_label.add_css_class("title")
+        self.address = Gtk.Label(label=url, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        self.address.add_css_class("subtitle")
+        titles.append(self.title_label)
+        titles.append(self.address)
+        header.set_title_widget(titles)
+
+        self.progress = Gtk.ProgressBar()
+        self.progress.add_css_class("kiwi")
+        self.error = Gtk.Label(xalign=0, wrap=True, visible=False)
+        self.error.add_css_class("statusbar")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(self.progress)
+        box.append(self.web)
+        box.append(self.error)
+        self.set_child(box)
+
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._key)
+        self.add_controller(keys)
+        self.web.load_uri(url)
+
+    def _create(self, _web, action):
+        # Links that want a new window open in this one.
+        self.web.load_uri(action.get_request().get_uri())
+        return None
+
+    def _update(self):
+        self.title_label.set_text(self.web.get_title() or self.start_title)
+        self.address.set_text(self.web.get_uri() or "")
+
+    def _progress(self):
+        if self.web.is_loading():
+            self.progress.set_fraction(self.web.get_estimated_load_progress())
+        else:
+            self.progress.set_fraction(1.0)  # the stripe
+
+    def _load_changed(self, _web, event):
+        if event == WebKit.LoadEvent.STARTED:
+            self.error.set_visible(False)
+        self._progress()
+
+    def _load_failed(self, _web, _event, uri, error):
+        self.error.set_text(f"Could not load {uri}: {error.message}. The button on the right "
+                            "opens the page in the browser.")
+        self.error.set_visible(True)
+        return False  # WebKit shows its own error page too
+
+    def _key(self, _controller, keyval, _keycode, state):
+        alt = state & Gdk.ModifierType.ALT_MASK
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+        elif keyval == Gdk.KEY_F5:
+            self.web.reload()
+        elif alt and keyval == Gdk.KEY_Left:
+            self.web.go_back()
+        elif alt and keyval == Gdk.KEY_Right:
+            self.web.go_forward()
+        else:
+            return False
+        return True
 
 
 AppBase = Adw.Application if Adw else Gtk.Application

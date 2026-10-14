@@ -1,4 +1,4 @@
-# Asustor ACC for Linux
+# Asustor Control Center for Linux
 
 A Linux version of the ASUSTOR Control Center (ACC): find ASUSTOR NAS
 devices on your LAN, open the ADM web UI or the shared folders, send
@@ -51,7 +51,8 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   with a small glyph of its form factor (tower, rack, flash), Scan, Ping,
   Open ADM and Wake buttons, a link button that opens the selected
   model's HDD compatibility list (SSD list for the all-flash FS models)
-  on asustor.com, a right-click menu (open shared folders,
+  from asustor.com in a window of the app (see
+  [Links to asustor.com](#links-to-asustorcom)), a right-click menu (open shared folders,
   copy the IP or MAC, forget a device), sortable columns, a search bar
   (Ctrl+F, or just start typing: name, IP, model, serial, MAC and state
   are matched), and automatic refresh every 30 seconds. The table is the
@@ -234,9 +235,14 @@ the clipboard, ready to paste into the file manager's location bar
 
 The link button (and the matching entry of the right-click menu) opens
 the selected model's compatibility list: HDD for AS models, SSD for the
-all-flash FS models. Without an exact address scheme it goes through
-DuckDuckGo's "I'm feeling ducky" redirect to the first asustor.com hit
-for the model. To use an exact address instead, create
+all-flash FS models. It opens in a window of the app, with back, forward
+and reload buttons and one that hands the page to your browser; the
+window works at any width from 360 px up. That needs the WebKitGTK 6.0
+bindings, which the packages recommend (`gir1.2-webkit-6.0` on Debian
+and Ubuntu, `webkitgtk6.0` on Fedora, `webkitgtk-6.0` on Arch); without
+them the list opens in the browser. Without an exact address scheme the
+link goes through DuckDuckGo's "I'm feeling ducky" redirect to the first
+asustor.com hit for the model. To use an exact address instead, create
 `~/.config/asustor-acc/links.json`:
 
 ```json

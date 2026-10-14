@@ -50,9 +50,9 @@ jobs:
           Package: asustor-acc-linux
           Version: ${VERSION}
           Architecture: amd64
-          Maintainer: Asustor ACC for Linux contributors
+          Maintainer: Asustor Control Center for Linux contributors
           Depends: python3-gi, gir1.2-gtk-4.0, xdg-utils
-          Recommends: gvfs-backends
+          Recommends: gvfs-backends, gir1.2-webkit-6.0
           Section: net
           Priority: optional
           Description: Native ASUSTOR NAS discovery and management for Linux
@@ -81,7 +81,7 @@ jobs:
           Summary: Native ASUSTOR NAS discovery and management for Linux
           License: MIT
           Requires: python3-gobject, gtk4, xdg-utils
-          Recommends: gvfs-smb
+          Recommends: gvfs-smb, webkitgtk6.0
           %description
           Unofficial Linux version of ASUSTOR Control Center: mDNS discovery, ADM web UI
           launcher, Wake-on-LAN. CLI (acc) plus GTK4 GUI (acc-gui).

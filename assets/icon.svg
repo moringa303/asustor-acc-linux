@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- Asustor ACC for Linux app icon (MIT, original work, not derived from
+  <!-- Asustor Control Center for Linux app icon (MIT, original work, not derived from
        ASUSTOR artwork): a storage stack (three platters) in thin line art
        on dark grey. -->
   <rect x="8" y="8" width="496" height="496" rx="112" fill="#202124"
@@ -15,5 +15,5 @@
     <path d="M 136 344 A 120 40 0 0 0 376 344"/>
   </g>
   <!-- activity LED on the bottom platter -->
-  <circle cx="340" cy="312" r="9" fill="#22d3ee"/>
+  <circle cx="340" cy="312" r="9" fill="#9EE12F"/>
 </svg>

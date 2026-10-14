@@ -1,4 +1,4 @@
-// acc is the CLI of Asustor ACC for Linux, an unofficial Linux version of
+// acc is the CLI of Asustor Control Center for Linux, an unofficial Linux version of
 // the ASUSTOR Control Center.
 //
 // ASUSTOR NAS devices announce themselves via mDNS/DNS-SD:
