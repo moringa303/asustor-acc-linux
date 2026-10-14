@@ -1,13 +1,9 @@
-<img src="assets/icon-128.png" alt="" width="96" align="left" />
-
-# Asustor Control Center for Linux
+# <img src="assets/icon-128.png" alt="" width="48" align="absmiddle" /> Asustor Control Center for Linux
 
 A Linux version of the ASUSTOR Control Center (ACC): find ASUSTOR NAS
 devices on your LAN, open the ADM web UI or the shared folders, send
 Wake-on-LAN, and see each NAS's uptime. Comes as a dependency-free CLI
 (`acc`) and a GTK4 GUI (`acc-gui`).
-
-<br clear="left" />
 
 > Unofficial community project. Not affiliated with, endorsed by, or
 > supported by ASUSTOR Inc. "ASUSTOR" and "ADM" are trademarks of ASUSTOR
