@@ -100,15 +100,14 @@ STATE_CLASSES = {
 SHARES_HINT = ("no application handles smb:// links; install gvfs-smb (GNOME, Cinnamon, "
                "XFCE) or kio-extras (KDE), or open the address in your file manager")
 
-# Links to the model's pages on asustor.com. Without an exact address
-# scheme the default goes through DuckDuckGo's "I'm feeling ducky"
+# Link to the model's compatibility list on asustor.com. Without an exact
+# address scheme the default goes through DuckDuckGo's "I'm feeling ducky"
 # redirect to the first asustor.com hit; ~/.config/asustor-acc/links.json
-# can replace the templates ({model} is substituted, {media} is HDD or
+# can replace the template ({model} is substituted, {media} is HDD or
 # SSD) and override single models:
-#   {"spec": "https://...{model}...", "compat": "https://...{model}...{media}...",
-#    "models": {"AS6704T": {"spec": "https://...", "compat": "https://..."}}}
+#   {"compat": "https://...{model}...{media}...",
+#    "models": {"AS6704T": {"compat": "https://..."}}}
 LINK_TEMPLATES = {
-    "spec": "https://duckduckgo.com/?q=%5C+site%3Aasustor.com+{model}+specifications",
     "compat": "https://duckduckgo.com/?q=%5C+site%3Aasustor.com+{model}+{media}+compatibility+list",
 }
 LINKS_FILE = os.path.join(GLib.get_user_config_dir(), "asustor-acc", "links.json")
@@ -126,17 +125,16 @@ def _load_links():
 
 
 def model_links(model):
-    """(spec URL, compatibility-list URL, media) for a model. Flash
-    (FS...) models are all-SSD, so they get the SSD list; everything else
-    is an HDD NAS first, even with M.2 slots."""
+    """(compatibility-list URL, media) for a model. Flash (FS...) models
+    are all-SSD, so they get the SSD list; everything else is an HDD NAS
+    first, even with M.2 slots."""
     base = model.split()[0] if model else ""
     media = "SSD" if model_shape(model)[1] == "flash" else "HDD"
     links = _load_links()
     templates = {**LINK_TEMPLATES, **{k: v for k, v in links.items() if k in LINK_TEMPLATES}}
     override = links.get("models", {}).get(base, {}) if isinstance(links.get("models"), dict) else {}
-    spec = override.get("spec") or templates["spec"].format(model=base, media=media)
     compat = override.get("compat") or templates["compat"].format(model=base, media=media)
-    return spec, compat, media
+    return compat, media
 
 CSS = """
 .state-dot { min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }
@@ -433,9 +431,8 @@ class AccWindow(Gtk.ApplicationWindow):
             ("shares", self.open_shares),
             ("wake", self.wake_selected),
             ("ping", self.ping_selected),
-            ("specs", lambda: self.open_link("spec")),
-            ("compat-hdd", lambda: self.open_link("compat")),
-            ("compat-ssd", lambda: self.open_link("compat")),
+            ("compat-hdd", self.open_compat),
+            ("compat-ssd", self.open_compat),
             ("copy-ip", lambda: self._copy("ip")),
             ("copy-mac", lambda: self._copy("mac")),
             ("forget", self.forget_selected),
@@ -519,33 +516,27 @@ class AccWindow(Gtk.ApplicationWindow):
         self.ping_btn.set_tooltip_text("Ping the selected NAS three times (Ctrl+P)")
         header.pack_end(self.ping_btn)
 
-        # Model pages on asustor.com: specifications, and the HDD or SSD
-        # compatibility list, whichever applies to the selected model.
-        links = Gtk.Box()
-        links.add_css_class("linked")
+        # The HDD or SSD compatibility list on asustor.com, whichever
+        # applies to the selected model.
         theme = Gtk.IconTheme.get_for_display(self.get_display())
 
         def icon(*names):
             # First name the icon theme has; symbolic sets differ per theme.
             return next((n for n in names if theme.has_icon(n)), names[-1])
 
-        self.specs_btn = Gtk.Button(action_name="win.specs", icon_name=icon(
-            "info-outline-symbolic", "dialog-information-symbolic", "help-about-symbolic"))
         self.hdd_btn = Gtk.Button(action_name="win.compat-hdd", icon_name=icon(
             "drive-harddisk-symbolic", "drive-harddisk"))
         self.ssd_btn = Gtk.Button(action_name="win.compat-ssd", icon_name=icon(
             "drive-harddisk-solidstate-symbolic", "media-flash-symbolic",
             "drive-removable-media-symbolic", "drive-harddisk-symbolic"))
-        for b in (self.specs_btn, self.hdd_btn, self.ssd_btn):
-            links.append(b)
-        header.pack_end(links)
+        header.pack_end(self.hdd_btn)
+        header.pack_end(self.ssd_btn)
 
     @staticmethod
     def _link_menu():
-        """Menu section with the asustor.com links; the compatibility entry
+        """Menu section with the asustor.com compatibility list; the entry
         that does not apply to the selected model hides itself."""
         section = Gio.Menu()
-        section.append("Specifications on asustor.com", "win.specs")
         for label, action in (("HDD compatibility list", "win.compat-hdd"),
                               ("SSD compatibility list", "win.compat-ssd")):
             item = Gio.MenuItem.new(label, action)
@@ -941,14 +932,12 @@ class AccWindow(Gtk.ApplicationWindow):
         self.lookup_action("wake").set_enabled(dev is not None and bool(dev.mac))
         self.lookup_action("ping").set_enabled(dev is not None and bool(dev.ip))
         has_model = dev is not None and bool(dev.model)
-        media = model_links(dev.model)[2] if has_model else ""
-        self.lookup_action("specs").set_enabled(has_model)
+        media = model_links(dev.model)[1] if has_model else ""
         self.lookup_action("compat-hdd").set_enabled(has_model and media == "HDD")
         self.lookup_action("compat-ssd").set_enabled(has_model and media == "SSD")
         self.hdd_btn.set_visible(media != "SSD")
         self.ssd_btn.set_visible(media == "SSD")
         model = dev.model if has_model else "the selected model"
-        self.specs_btn.set_tooltip_text(f"{model}: specifications on asustor.com")
         self.hdd_btn.set_tooltip_text(f"{model}: HDD compatibility list on asustor.com")
         self.ssd_btn.set_tooltip_text(f"{model}: SSD compatibility list on asustor.com")
         self.lookup_action("copy-ip").set_enabled(dev is not None and bool(dev.ip))
@@ -1047,16 +1036,14 @@ class AccWindow(Gtk.ApplicationWindow):
         self.set_status(f"Waking {dev.name}…")
         self._run_acc(["wol", dev.mac], lambda out, err: self.set_status(out or err))
 
-    def open_link(self, which):
-        """Open the model's spec page or compatibility list on asustor.com."""
+    def open_compat(self):
+        """Open the model's HDD or SSD compatibility list on asustor.com."""
         dev = self.selected()
         if dev is None or not dev.model:
             return
-        spec, compat, media = model_links(dev.model)
-        url = spec if which == "spec" else compat
-        what = "specifications" if which == "spec" else f"{media} compatibility list"
-        self.set_status(f"Opening {dev.model} {what}…")
-        self._launch(url)
+        compat, media = model_links(dev.model)
+        self.set_status(f"Opening the {media} compatibility list for {dev.model}…")
+        self._launch(compat)
 
     def ping_selected(self):
         dev = self.selected()
