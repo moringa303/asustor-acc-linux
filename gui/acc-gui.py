@@ -3,7 +3,7 @@
 
 Discovery, Wake-on-LAN and the device memory live in the bundled `acc`
 binary; this window presents its results like the Control Center device
-list, keeps them fresh and shows the uptime each NAS reports over SNMP.
+list and keeps them fresh.
 """
 import json
 import os
@@ -83,9 +83,12 @@ COLUMNS = [
     ("ADM", "adm", False),
     ("Port", "port", False),
     ("State", "state", False),
-    ("Uptime", "uptime_text", False),
 ]
-TABULAR = {"ip", "serial", "mac", "adm", "port", "uptime_text"}
+TABULAR = {"ip", "serial", "mac", "adm", "port"}
+# Fixed widths (px) for the columns that may shorten with an ellipsis
+# when the window is narrow; Model and State keep their natural width,
+# Name takes the rest. Tooltips carry the full text.
+FIXED_WIDTHS = {"ip": 150, "serial": 150, "mac": 150, "adm": 100, "port": 56}
 
 STATE_CLASSES = {
     "Ready": "ready",
@@ -94,7 +97,6 @@ STATE_CLASSES = {
     "Offline": "offline",
 }
 
-UPTIME_TIP = "Uptime read from the NAS via SNMP"
 SHARES_HINT = ("no application handles smb:// links; install gvfs-smb (GNOME, Cinnamon, "
                "XFCE) or kio-extras (KDE), or open the address in your file manager")
 
@@ -104,7 +106,7 @@ CSS = """
 .state-dot.uninitialized { background: #3584e4; }
 .state-dot.notready { background: #e5a50a; }
 .state-dot.offline { background: #9a9996; }
-columnview > listview > row > cell { padding: 7px 12px; }
+columnview > listview > row > cell { padding: 7px 8px; }
 listview.cards > row { padding: 8px 12px; }
 .card-name { font-weight: bold; }
 .tabular { font-variant-numeric: tabular-nums; }
@@ -232,9 +234,9 @@ class Device(GObject.Object):
     port = GObject.Property(type=str, default="")
     state = GObject.Property(type=str, default="")
     online = GObject.Property(type=bool, default=False)
+    # Tooltip of the State cell: the uptime the NAS reports over SNMP
+    # while online, when it was last seen while offline.
     state_tip = GObject.Property(type=str, default="")
-    uptime_text = GObject.Property(type=str, default="")
-    uptime_tip = GObject.Property(type=str, default="")
     # Card lines: "Ready · 192.168.1.10 · AS5304T · ADM 4.3.3 · port 8000"
     # and "00:11:32:AA:BB:CC · AS2025TEST01".
     details = GObject.Property(type=str, default="")
@@ -245,6 +247,7 @@ class Device(GObject.Object):
         self.data = {}
         self.uptime = None  # seconds the NAS reported, as of last_seen
         self.last_seen = None
+        self.seen_tip = ""
         self.update(data)
 
     @staticmethod
@@ -282,11 +285,11 @@ class Device(GObject.Object):
         self.uptime = int(uptime) if self.online and isinstance(uptime, (int, float)) else None
         self.last_seen = _parse_time(data.get("last_seen"))
         state = self.state
-        self.state_tip = ""
+        self.seen_tip = ""
         if not self.online and self.last_seen:
             state = f"Offline, last seen {format_seen(self.last_seen)}"
             seen = datetime.fromtimestamp(self.last_seen).strftime("%-d %b %Y %H:%M:%S")
-            self.state_tip = f"Last answered a scan on {seen}"
+            self.seen_tip = f"Last answered a scan on {seen}"
         parts = [state, self.ip,
                  f"ADM {self.adm}" if self.adm else "",
                  f"port {self.port}" if self.port else ""]
@@ -302,14 +305,14 @@ class Device(GObject.Object):
         return self.uptime + max(0, elapsed)
 
     def tick(self):
-        """Refresh the Uptime text for the current time (blank when the NAS
-        did not report one; the column is only shown when some NAS did)."""
+        """Refresh the State tooltip for the current time."""
         up = self.uptime_now()
-        text, tip = (format_uptime(up), UPTIME_TIP) if up is not None else ("", "")
-        if text != self.uptime_text:
-            self.uptime_text = text
-        if tip != self.uptime_tip:
-            self.uptime_tip = tip
+        if up is not None:
+            tip = f"Up {format_uptime(up)} (reported by the NAS over SNMP)"
+        else:
+            tip = self.seen_tip
+        if tip != self.state_tip:
+            self.state_tip = tip
 
 
 class ContentLayout(Gtk.BoxLayout):
@@ -391,6 +394,7 @@ class AccWindow(Gtk.ApplicationWindow):
             ("open", self.open_selected),
             ("shares", self.open_shares),
             ("wake", self.wake_selected),
+            ("ping", self.ping_selected),
             ("copy-ip", lambda: self._copy("ip")),
             ("copy-mac", lambda: self._copy("mac")),
             ("forget", self.forget_selected),
@@ -445,6 +449,7 @@ class AccWindow(Gtk.ApplicationWindow):
         section.append("Open ADM", "win.open")
         section.append("Open shared folders", "win.shares")
         section.append("Wake (WOL)", "win.wake")
+        section.append("Ping", "win.ping")
         menu.append_section(None, section)
         section = Gio.Menu()
         section.append(f"Refresh every {REFRESH_SECONDS} s", "win.auto-refresh")
@@ -468,6 +473,9 @@ class AccWindow(Gtk.ApplicationWindow):
         self.wake_btn = Gtk.Button(label="Wake", action_name="win.wake")
         self.wake_btn.set_tooltip_text("Send a Wake-on-LAN magic packet to the selected NAS")
         header.pack_end(self.wake_btn)
+        self.ping_btn = Gtk.Button(label="Ping", action_name="win.ping")
+        self.ping_btn.set_tooltip_text("Ping the selected NAS three times (Ctrl+P)")
+        header.pack_end(self.ping_btn)
 
     def _build_views(self):
         """The table and the card list: two views of one selection."""
@@ -491,14 +499,12 @@ class AccWindow(Gtk.ApplicationWindow):
             factory.connect("unbind", self._unbind)
             col = Gtk.ColumnViewColumn.new(title, factory)
             col.set_expand(expand)
+            if prop in FIXED_WIDTHS:
+                col.set_fixed_width(FIXED_WIDTHS[prop])
             col.set_sorter(Gtk.CustomSorter.new(lambda a, b, *_, p=prop: self._compare(a, b, p)))
             self.view.append_column(col)
             if prop == "name":
                 name_col = col
-            if prop == "uptime_text":
-                # Only shown once a NAS reports its uptime (SNMP enabled).
-                self.uptime_col = col
-                col.set_visible(False)
         self.view.sort_by_column(name_col, Gtk.SortType.ASCENDING)
 
         factory = Gtk.SignalListItemFactory()
@@ -516,6 +522,7 @@ class AccWindow(Gtk.ApplicationWindow):
         section.append("Open ADM", "win.open")
         section.append("Open shared folders", "win.shares")
         section.append("Wake (WOL)", "win.wake")
+        section.append("Ping", "win.ping")
         model.append_section(None, section)
         section = Gio.Menu()
         section.append("Copy IP address", "win.copy-ip")
@@ -592,7 +599,7 @@ class AccWindow(Gtk.ApplicationWindow):
         self.view_name, self.compact = layout
         if self.stack.get_visible_child_name() != "empty":
             self.stack.set_visible_child_name(self.view_name)
-        for widget in (self.wake_btn, self.scan_label, self.titles):
+        for widget in (self.wake_btn, self.ping_btn, self.scan_label, self.titles):
             widget.set_visible(not self.compact)
         if self._status_timer is None and not self.last_error:
             self._set_hint()
@@ -607,8 +614,9 @@ class AccWindow(Gtk.ApplicationWindow):
     # -- table cells -----------------------------------------------------
     def _setup_cell(self, _factory, item, prop):
         # Cells ellipsize so the table fits any width from TABLE_WIDTH up;
-        # the tooltip carries the full text.
-        label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        # the tooltip carries the full text. The model is always shown whole.
+        ellipsize = Pango.EllipsizeMode.NONE if prop == "model" else Pango.EllipsizeMode.END
+        label = Gtk.Label(xalign=0, ellipsize=ellipsize)
         if prop in TABULAR:
             label.add_css_class("tabular")
         if prop not in ("state", "model"):
@@ -631,9 +639,7 @@ class AccWindow(Gtk.ApplicationWindow):
         label = getattr(widget, "label", widget)
         flags = GObject.BindingFlags.SYNC_CREATE
         item.bindings = [dev.bind_property(prop, label, "label", flags)]
-        if prop == "uptime_text":
-            item.bindings.append(dev.bind_property("uptime_tip", label, "tooltip-text", flags))
-        elif prop == "state":
+        if prop == "state":
             item.bindings.append(dev.bind_property("state_tip", widget, "tooltip-text", flags))
         else:
             item.bindings.append(dev.bind_property(prop, label, "tooltip-text", flags))
@@ -650,7 +656,7 @@ class AccWindow(Gtk.ApplicationWindow):
 
     # -- cards -----------------------------------------------------------
     def _setup_card(self, _factory, item):
-        # Model (with its glyph) first, then the name, uptime on the right.
+        # Model (with its glyph) first, then the name.
         row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         top = Gtk.Box(spacing=8)
         row.glyph = ModelGlyph()
@@ -659,9 +665,7 @@ class AccWindow(Gtk.ApplicationWindow):
         row.model = Gtk.Label(xalign=0)
         row.model.add_css_class("card-name")
         row.name = Gtk.Label(xalign=0, hexpand=True, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
-        row.uptime = Gtk.Label(xalign=1, valign=Gtk.Align.CENTER)
-        row.uptime.add_css_class("tabular")
-        for w in (row.glyph, row.dot, row.model, row.name, row.uptime):
+        for w in (row.glyph, row.dot, row.model, row.name):
             top.append(w)
         row.details = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
         row.ids = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
@@ -677,8 +681,7 @@ class AccWindow(Gtk.ApplicationWindow):
         item.bindings = [
             dev.bind_property("model", row.model, "label", flags),
             dev.bind_property("name", row.name, "label", flags),
-            dev.bind_property("uptime_text", row.uptime, "label", flags),
-            dev.bind_property("uptime_tip", row.uptime, "tooltip-text", flags),
+            dev.bind_property("state_tip", row, "tooltip-text", flags),
             dev.bind_property("details", row.details, "label", flags),
             dev.bind_property("ids", row.ids, "label", flags),
         ]
@@ -720,15 +723,7 @@ class AccWindow(Gtk.ApplicationWindow):
         # Offline devices always sink to the bottom.
         if a.online != b.online:
             return -1 if a.online else 1
-        if prop == "uptime_text":
-            # Ascending = shortest uptime first, unknown uptime last;
-            # offline ones by last seen, most recent first.
-            if a.online:
-                ua, ub = a.uptime_now(), b.uptime_now()
-                ka, kb = (ua is None, ua or 0), (ub is None, ub or 0)
-            else:
-                ka, kb = -(a.last_seen or 0), -(b.last_seen or 0)
-        elif prop == "port":
+        if prop == "port":
             ka, kb = int(a.port or 0), int(b.port or 0)
         else:
             ka, kb = getattr(a, prop).lower(), getattr(b, prop).lower()
@@ -822,7 +817,6 @@ class AccWindow(Gtk.ApplicationWindow):
         if self.last_scan:
             summary += " · scanned " + time.strftime("%H:%M:%S", time.localtime(self.last_scan))
         self._show_summary(summary)
-        self.uptime_col.set_visible(any(d.uptime is not None for d in devices))
 
         if self.sorted.get_n_items():
             self.stack.set_visible_child_name(self.view_name)
@@ -868,6 +862,7 @@ class AccWindow(Gtk.ApplicationWindow):
         self.lookup_action("shares").set_enabled(
             dev is not None and dev.online and bool(dev.shares_url))
         self.lookup_action("wake").set_enabled(dev is not None and bool(dev.mac))
+        self.lookup_action("ping").set_enabled(dev is not None and bool(dev.ip))
         self.lookup_action("copy-ip").set_enabled(dev is not None and bool(dev.ip))
         self.lookup_action("copy-mac").set_enabled(dev is not None and bool(dev.mac))
         self.lookup_action("forget").set_enabled(dev is not None and not dev.online)
@@ -963,6 +958,35 @@ class AccWindow(Gtk.ApplicationWindow):
             return
         self.set_status(f"Waking {dev.name}…")
         self._run_acc(["wol", dev.mac], lambda out, err: self.set_status(out or err))
+
+    def ping_selected(self):
+        dev = self.selected()
+        if dev is None or not dev.ip:
+            return
+        name, ip = dev.name, dev.ip
+        self.set_status(f"Pinging {name} ({ip})…", sticky=True)
+
+        def worker():
+            try:
+                res = subprocess.run(["ping", "-c", "3", "-W", "1", ip],
+                                     capture_output=True, text=True, timeout=15)
+                out = res.stdout
+            except FileNotFoundError:
+                GLib.idle_add(lambda: self.set_status("ping is not installed (package iputils).") and False)
+                return
+            except subprocess.TimeoutExpired:
+                out = ""
+            got = re.search(r"(\d+) packets transmitted, (\d+) (?:packets )?received", out)
+            rtt = re.search(r"= [\d.]+/([\d.]+)/", out)
+            if got and int(got.group(2)) > 0:
+                text = f"{name} ({ip}): {got.group(2)}/{got.group(1)} replies"
+                if rtt:
+                    text += f", {float(rtt.group(1)):.1f} ms average"
+            else:
+                text = f"{name} ({ip}): no reply to ping"
+            GLib.idle_add(lambda: self.set_status(text) and False)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def forget_selected(self):
         dev = self.selected()
@@ -1106,6 +1130,7 @@ class AccApp(AppBase):
         self.set_accels_for_action("win.scan", ["F5", "<Control>r"])
         self.set_accels_for_action("win.open", ["<Control>o"])
         self.set_accels_for_action("win.shares", ["<Control><Shift>o"])
+        self.set_accels_for_action("win.ping", ["<Control>p"])
 
     def do_activate(self):
         win = self.get_active_window() or AccWindow(self)

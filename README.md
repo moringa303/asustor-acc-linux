@@ -47,8 +47,8 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   ```
 
 - `acc-gui`: GTK4 front-end with the familiar device table
-  (Model / Name / IP / Serial / MAC / ADM / Port / State / Uptime), each
-  model with a small glyph of its form factor (tower, rack, flash), Scan,
+  (Model / Name / IP / Serial / MAC / ADM / Port / State), each model
+  with a small glyph of its form factor (tower, rack, flash), Scan, Ping,
   Open ADM and Wake buttons, a right-click menu (open shared folders,
   copy the IP or MAC, forget a device), sortable columns, and automatic
   refresh every 30 seconds. The table is the layout from 1000 px of
@@ -58,8 +58,7 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   list, dimmed, so you can wake them.
 
 - Uptime: read from the NAS via SNMP, shown in the CLI's UPTIME column
-  and the GUI's Uptime column, which only appears once a NAS reports one
-  (see [Uptime](#uptime)).
+  and as the tooltip of the GUI's State cell (see [Uptime](#uptime)).
 
 - Device memory: `acc` remembers every NAS it has seen. A NAS that is
   asleep can still be woken with `acc wol <name>` or the GUI's Wake
@@ -155,7 +154,8 @@ terminal and `go run ./cmd/acc scan` in another.
 
 The discovery protocol does not carry the uptime, so `acc` asks the NAS
 over SNMP: `hrSystemUptime` (HOST-RESOURCES-MIB), falling back to
-`sysUpTime`. For that, enable SNMP on the NAS once: ADM › Services ›
+`sysUpTime`. The CLI prints it in the UPTIME column; the GUI shows it
+when you hover over a device's State. For that, enable SNMP on the NAS once: ADM › Services ›
 SNMP, tick SNMP v1/v2c, community `public` (or pass yours with
 `--community`). Without SNMP the column shows `-` and everything else
 works as before. The query runs alongside discovery, so a NAS without
