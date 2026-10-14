@@ -40,6 +40,10 @@ a GTK4/PyGObject GUI (`gui/acc-gui.py`) that drives the CLI through
 - The version lives in git tags only; `main.version` is set by ldflags.
 - Commits are authored by the repository owner (`git config user.name
   "Frank Eckardt"`, `user.email frank@takindo.com`), never by a Claude
-  identity, and commit messages are plain: no `Co-Authored-By`,
-  `Claude-Session` or other AI attribution trailers. The owner is the
-  sole contributor on GitHub.
+  identity. Commit messages, pull request titles and descriptions are
+  plain: no `Co-Authored-By`, `Claude-Session`, "Generated with Claude
+  Code" or any other AI attribution. The owner is the sole contributor
+  on GitHub.
+- Before pushing: `gofmt -l ./cmd` empty, `go vet ./...`, `go test
+  ./...` and `staticcheck ./...` clean, `python3 -m pyflakes
+  gui/acc-gui.py` clean.

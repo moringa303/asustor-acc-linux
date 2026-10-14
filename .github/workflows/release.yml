@@ -74,6 +74,13 @@ jobs:
           T="asustor-acc-linux-${VERSION}"
           mkdir -p "$T" && cp -r stage/usr "$T/" && install -m755 packaging/install.sh "$T/"
           tar czf "${T}-linux-amd64.tar.gz" "$T"
+      - name: Stable asset names
+        # Version-free copies so the README's "latest release" links keep
+        # working: .../releases/latest/download/<name>.
+        run: |
+          cp asustor-acc-linux_*_amd64.deb asustor-acc-linux_amd64.deb
+          cp asustor-acc-linux-*.x86_64.rpm asustor-acc-linux.x86_64.rpm
+          cp asustor-acc-linux-*-linux-amd64.tar.gz asustor-acc-linux-linux-amd64.tar.gz
       - name: Checksums
         run: sha256sum acc *.deb *.rpm *.tar.gz > SHA256SUMS
       - name: Release
