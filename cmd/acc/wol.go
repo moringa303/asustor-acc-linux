@@ -58,7 +58,10 @@ func sendWOL(mac, ip string) ([]string, error) {
 // broadcastAddrs lists the IPv4 directed broadcast address of every
 // interface that is up and not loopback (only --iface when set).
 func broadcastAddrs() []string {
-	ifaces, _ := net.Interfaces()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		vlog("cannot list interfaces: %v", err)
+	}
 	var out []string
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 ||

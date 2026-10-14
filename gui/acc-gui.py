@@ -48,17 +48,21 @@ WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
 SCAN_TIMEOUT = 4  # seconds acc listens for answers
 REFRESH_SECONDS = int(os.environ.get("ACC_GUI_REFRESH", "30"))
 
-# Layout. The device list is a table when the window is wide enough to
-# show every column in full and a list of cards below that, so nothing is
-# ever truncated or hidden behind a horizontal scrollbar. TABLE_WIDTH is
-# the width the table needs for typical content (measured with the test
-# harness); the real natural width of the table is checked as well, so
-# longer names raise the breakpoint instead of clipping. Below
-# COMPACT_WIDTH the header bar drops the Wake button (the action stays in
-# the menus) so the window can shrink to MIN_WIDTH.
-TABLE_WIDTH = 1000
-TABLE_SLACK = 24
-COMPACT_WIDTH = 600
+# Layout. The device list is a table when the window content is wide
+# enough to show every column in full and a list of cards below that, so
+# nothing is ever truncated or hidden behind a horizontal scrollbar.
+# TABLE_WIDTH is what the nine columns need for typical content (1010 px
+# measured with the test harness devices). Below COMPACT_WIDTH the header
+# bar keeps only the Scan icon, Open ADM and the menu (Wake stays in the
+# menus) and the summary moves from the title to the status bar, so the
+# window can shrink to MIN_WIDTH without hiding anything. Both are floors:
+# the real width the table and the full header bar need is measured too,
+# and a layout gives way LAYOUT_SLACK before that, because a window
+# manager keeps the window at the current layout's minimum width and
+# would otherwise never let it reach the breakpoint.
+TABLE_WIDTH = 1010
+COMPACT_WIDTH = 700
+LAYOUT_SLACK = 24
 MIN_WIDTH = 360
 
 # Table columns: title, Device property, whether the column takes the
@@ -284,8 +288,11 @@ class AccWindow(Gtk.ApplicationWindow):
         self.last_scan = None
         self.last_error = None
         self.acc_version = ""
+        self.summary = ""
         self.view_name = "table"
-        self._table_width = 0
+        self.compact = False
+        self._table_width = 0  # widest the table measured since the last scan
+        self._header_width = 0  # widest the full header bar measured so far
         self._status_timer = None
         self._rows = {}  # view -> {list item: (device, row widget)}
 
@@ -331,28 +338,29 @@ class AccWindow(Gtk.ApplicationWindow):
             self._refresh_summary()
 
     def _build_header(self):
-        header = Gtk.HeaderBar()
+        header = self.header = Gtk.HeaderBar()
         self.set_titlebar(header)
 
         scan_btn = Gtk.Button(action_name="win.scan")
         content = Gtk.Box(spacing=6)
         content.append(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
-        content.append(Gtk.Label(label="Scan"))
+        self.scan_label = Gtk.Label(label="Scan")
+        content.append(self.scan_label)
         scan_btn.set_child(content)
         scan_btn.set_tooltip_text("Search the local network for ASUSTOR NAS devices (F5)")
         header.pack_start(scan_btn)
         self.spinner = Gtk.Spinner()
         header.pack_start(self.spinner)
 
-        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
-        title = Gtk.Label(label="Asustor ACC", ellipsize=Pango.EllipsizeMode.END)
+        self.titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        title = Gtk.Label(label="Asustor ACC")
         title.add_css_class("title")
-        self.subtitle = Gtk.Label(label="Scanning the local network…",
-                                  ellipsize=Pango.EllipsizeMode.END)
+        self.subtitle = Gtk.Label()
         self.subtitle.add_css_class("subtitle")
-        titles.append(title)
-        titles.append(self.subtitle)
-        header.set_title_widget(titles)
+        self.titles.append(title)
+        self.titles.append(self.subtitle)
+        header.set_title_widget(self.titles)
+        self._show_summary("Scanning the local network…")
 
         menu = Gio.Menu()
         section = Gio.Menu()
@@ -490,18 +498,32 @@ class AccWindow(Gtk.ApplicationWindow):
     # -- responsive layout -----------------------------------------------
     def _classify_layout(self, width):
         """Layout for the content width: (view name, compact header)."""
-        # The table keeps its cells while hidden, so its natural width is
-        # known in both layouts; remember the widest, the scan resets it.
+        # The table keeps its cells while hidden, so its width is known in
+        # both layouts. The full header bar can only be measured while it
+        # is shown, so its width is remembered from then.
         natural = self.view.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
-        self._table_width = max(self._table_width, natural + TABLE_SLACK)
-        table = width >= max(TABLE_WIDTH, self._table_width)
-        return ("table" if table else "cards", width < COMPACT_WIDTH)
+        self._table_width = max(self._table_width, natural + LAYOUT_SLACK)
+        if not self.compact:
+            minimum = self.header.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+            self._header_width = max(self._header_width, minimum + LAYOUT_SLACK)
+        return ("table" if width >= max(TABLE_WIDTH, self._table_width) else "cards",
+                width < max(COMPACT_WIDTH, self._header_width))
 
     def _apply_layout(self, layout):
-        self.view_name, compact = layout
+        self.view_name, self.compact = layout
         if self.stack.get_visible_child_name() != "empty":
             self.stack.set_visible_child_name(self.view_name)
-        self.wake_btn.set_visible(not compact)
+        for widget in (self.wake_btn, self.scan_label, self.titles):
+            widget.set_visible(not self.compact)
+        if self._status_timer is None and not self.last_error:
+            self._set_hint()
+
+    def _show_summary(self, text):
+        """Device summary: the header subtitle, or the status bar when compact."""
+        self.summary = text
+        self.subtitle.set_text(text)
+        if self.compact and self._status_timer is None and not self.last_error:
+            self._set_hint()
 
     # -- table cells -----------------------------------------------------
     def _setup_cell(self, _factory, item, prop):
@@ -617,7 +639,7 @@ class AccWindow(Gtk.ApplicationWindow):
         self.scanning = True
         self.lookup_action("scan").set_enabled(False)
         self.spinner.start()
-        self.subtitle.set_text("Scanning the local network…")
+        self._show_summary("Scanning the local network…")
 
         def worker():
             try:
@@ -695,7 +717,7 @@ class AccWindow(Gtk.ApplicationWindow):
         summary = " · ".join(parts) if parts else "No devices"
         if self.last_scan:
             summary += " · scanned " + time.strftime("%H:%M:%S", time.localtime(self.last_scan))
-        self.subtitle.set_text(summary)
+        self._show_summary(summary)
 
         if self.sorted.get_n_items():
             self.stack.set_visible_child_name(self.view_name)
@@ -906,7 +928,9 @@ class AccWindow(Gtk.ApplicationWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _set_hint(self):
-        if self.store.get_n_items():
+        if self.compact:
+            self.status.set_text(self.summary)
+        elif self.store.get_n_items():
             self.status.set_text("Double-click a NAS to open ADM. Right-click for more.")
         else:
             self.status.set_text("Press Scan to search for ASUSTOR NAS devices.")

@@ -315,8 +315,10 @@ func berTLV(tag byte, val []byte) []byte {
 		out = append(out, byte(n))
 	case n < 0x100:
 		out = append(out, 0x81, byte(n))
-	default:
+	case n < 0x10000:
 		out = append(out, 0x82, byte(n>>8), byte(n))
+	default:
+		out = append(out, 0x83, byte(n>>16), byte(n>>8), byte(n))
 	}
 	return append(out, val...)
 }
