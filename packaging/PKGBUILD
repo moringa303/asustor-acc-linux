@@ -2,13 +2,15 @@
 # AUR package for Asustor ACC for Linux. Update url/source after publishing
 # the GitHub repository, then run updpkgsums.
 pkgname=asustor-acc-linux
-pkgver=1.4.0
+pkgver=1.4.1
 pkgrel=1
 pkgdesc="Unofficial Linux version of ASUSTOR Control Center (NAS discovery, ADM launcher, WOL)"
 arch=(x86_64)
 url="https://github.com/moringa303/asustor-acc-linux"
 license=(MIT)
 depends=(gtk4 python-gobject xdg-utils)
+optdepends=('gvfs-smb: open shared folders from GNOME, Cinnamon and XFCE file managers'
+            'kio-extras: open shared folders from Dolphin')
 makedepends=(go)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
@@ -23,6 +25,7 @@ package() {
   cd "$pkgname-$pkgver"
   install -Dm755 acc "$pkgdir/usr/bin/acc"
   install -Dm755 gui/acc-gui.py "$pkgdir/usr/bin/acc-gui"
+  sed -i "s/^GUI_VERSION = \"dev\"/GUI_VERSION = \"$pkgver\"/" "$pkgdir/usr/bin/acc-gui"
   for s in 48 64 128 256 512; do
     install -Dm644 "assets/icon-$s.png" \
       "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/io.github.moringa303.AsustorAcc.png"

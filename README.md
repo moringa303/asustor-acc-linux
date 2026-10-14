@@ -56,7 +56,8 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   list, dimmed, so you can wake them.
 
 - Uptime: read from the NAS via SNMP, shown in the CLI's UPTIME column
-  and the GUI's Uptime column (see [Uptime](#uptime)).
+  and the GUI's Uptime column, which only appears once a NAS reports one
+  (see [Uptime](#uptime)).
 
 - Device memory: `acc` remembers every NAS it has seen. A NAS that is
   asleep can still be woken with `acc wol <name>` or the GUI's Wake
@@ -199,6 +200,18 @@ Wake-on-LAN sends the magic packet to the limited broadcast address, to
 the directed broadcast of every interface (or only `--iface`), and to the
 last known address of the NAS, so a NAS on a second network card is
 reached too.
+
+## Troubleshooting: an old version keeps running
+
+The About dialog shows the versions of both `acc-gui` and the `acc`
+binary it found, and the status bar warns when they differ. A leftover
+copy from an earlier `install` to `/usr/local/bin` is started before a
+packaged one in `/usr/bin`: `which -a acc acc-gui` lists every copy,
+remove the old ones.
+
+"Open shared folders" hands `smb://<ip>/` to your file manager; it needs
+the SMB backend of your desktop (`gvfs-smb` on GNOME, Cinnamon and XFCE,
+`kio-extras` on KDE), which the packages recommend.
 
 ## Troubleshooting: "No devices found"
 

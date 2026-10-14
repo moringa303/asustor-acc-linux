@@ -7,6 +7,7 @@ list, keeps them fresh and shows the uptime each NAS reports over SNMP.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -39,6 +40,10 @@ def _find_acc():
 
 
 ACC_BIN = _find_acc()
+ACC_PATH = shutil.which(ACC_BIN) or ACC_BIN
+
+# Stamped by the packaging (release workflow, PKGBUILD); "dev" in a checkout.
+GUI_VERSION = "dev"
 
 # Must match the installed .desktop file name and the hicolor icon name,
 # or GNOME shows a generic gear icon for the window.
@@ -88,8 +93,8 @@ STATE_CLASSES = {
 }
 
 UPTIME_TIP = "Uptime read from the NAS via SNMP"
-NO_UPTIME_TIP = ("Enable SNMP (v1/v2c, community public) in ADM › Services › SNMP "
-                 "to show the uptime")
+SHARES_HINT = ("no application handles smb:// links; install gvfs-smb (GNOME, Cinnamon, "
+               "XFCE) or kio-extras (KDE), or open the address in your file manager")
 
 CSS = """
 .state-dot { min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }
@@ -152,6 +157,7 @@ class Device(GObject.Object):
     port = GObject.Property(type=str, default="")
     state = GObject.Property(type=str, default="")
     online = GObject.Property(type=bool, default=False)
+    state_tip = GObject.Property(type=str, default="")
     uptime_text = GObject.Property(type=str, default="")
     uptime_tip = GObject.Property(type=str, default="")
     # Card lines: "Ready · 192.168.1.10 · AS5304T · ADM 4.3.3 · port 8000"
@@ -200,7 +206,13 @@ class Device(GObject.Object):
         uptime = data.get("uptime_seconds")
         self.uptime = int(uptime) if self.online and isinstance(uptime, (int, float)) else None
         self.last_seen = _parse_time(data.get("last_seen"))
-        parts = [self.state, self.ip, self.model,
+        state = self.state
+        self.state_tip = ""
+        if not self.online and self.last_seen:
+            state = f"Offline, last seen {format_seen(self.last_seen)}"
+            seen = datetime.fromtimestamp(self.last_seen).strftime("%-d %b %Y %H:%M:%S")
+            self.state_tip = f"Last answered a scan on {seen}"
+        parts = [state, self.ip, self.model,
                  f"ADM {self.adm}" if self.adm else "",
                  f"port {self.port}" if self.port else ""]
         self.details = " · ".join(p for p in parts if p)
@@ -215,18 +227,10 @@ class Device(GObject.Object):
         return self.uptime + max(0, elapsed)
 
     def tick(self):
-        """Refresh the Uptime text for the current time."""
+        """Refresh the Uptime text for the current time (blank when the NAS
+        did not report one; the column is only shown when some NAS did)."""
         up = self.uptime_now()
-        if up is not None:
-            text, tip = format_uptime(up), UPTIME_TIP
-        elif self.online:
-            text, tip = "–", NO_UPTIME_TIP
-        elif self.last_seen:
-            text = "last seen " + format_seen(self.last_seen)
-            seen = datetime.fromtimestamp(self.last_seen).strftime("%-d %b %Y %H:%M:%S")
-            tip = f"Last answered a scan on {seen}."
-        else:
-            text, tip = "", ""
+        text, tip = (format_uptime(up), UPTIME_TIP) if up is not None else ("", "")
         if text != self.uptime_text:
             self.uptime_text = text
         if tip != self.uptime_tip:
@@ -417,6 +421,10 @@ class AccWindow(Gtk.ApplicationWindow):
             self.view.append_column(col)
             if prop == "name":
                 name_col = col
+            if prop == "uptime_text":
+                # Only shown once a NAS reports its uptime (SNMP enabled).
+                self.uptime_col = col
+                col.set_visible(False)
         self.view.sort_by_column(name_col, Gtk.SortType.ASCENDING)
 
         factory = Gtk.SignalListItemFactory()
@@ -548,6 +556,8 @@ class AccWindow(Gtk.ApplicationWindow):
         item.bindings = [dev.bind_property(prop, label, "label", flags)]
         if prop == "uptime_text":
             item.bindings.append(dev.bind_property("uptime_tip", label, "tooltip-text", flags))
+        if prop == "state":
+            item.bindings.append(dev.bind_property("state_tip", widget, "tooltip-text", flags))
         item.handlers = [dev.connect("notify::online", lambda *_: self._style(widget, dev))]
         if prop == "state":
             item.handlers.append(dev.connect("notify::state", lambda *_: self._style(widget, dev)))
@@ -718,6 +728,7 @@ class AccWindow(Gtk.ApplicationWindow):
         if self.last_scan:
             summary += " · scanned " + time.strftime("%H:%M:%S", time.localtime(self.last_scan))
         self._show_summary(summary)
+        self.uptime_col.set_visible(any(d.uptime is not None for d in devices))
 
         if self.sorted.get_n_items():
             self.stack.set_visible_child_name(self.view_name)
@@ -740,8 +751,18 @@ class AccWindow(Gtk.ApplicationWindow):
         if self._status_timer is None and not self.last_error:
             self._set_hint()
 
-    def _got_version(self, out, _err):
+    def _got_version(self, out, err):
+        """Record the acc version; warn when an old copy of acc is being used
+        (a leftover in /usr/local/bin next to a packaged install, say)."""
         self.acc_version = out.strip().removeprefix("acc ").strip()
+        if not self.acc_version:
+            self.set_status(f"{ACC_PATH} is too old for this GUI (no 'version' command): "
+                            f"{err.splitlines()[0] if err else 'no output'}. Remove it or "
+                            "reinstall; 'which -a acc acc-gui' lists every copy.", sticky=True)
+        elif "dev" not in (GUI_VERSION, self.acc_version) and self.acc_version != GUI_VERSION:
+            self.set_status(f"acc {self.acc_version} at {ACC_PATH} does not match acc-gui "
+                            f"{GUI_VERSION}: an older copy is being used. Remove it or "
+                            "reinstall; 'which -a acc acc-gui' lists every copy.", sticky=True)
 
     # -- selection and actions -------------------------------------------
     def selected(self):
@@ -766,7 +787,15 @@ class AccWindow(Gtk.ApplicationWindow):
     def _device_at(self, view, y):
         """The device of the row at y in view, from its bound row widgets."""
         for dev, widget in self._rows[view].values():
-            ok, bounds = widget.compute_bounds(view)
+            # Hit-test the whole list row, not just the bound label, so
+            # the padding above and below the text counts as well.
+            row = widget
+            for _ in range(6):
+                parent = row.get_parent()
+                if parent is None or parent is view or row.get_css_name() == "row":
+                    break
+                row = parent
+            ok, bounds = row.compute_bounds(view)
             if ok and bounds.get_y() <= y < bounds.get_y() + bounds.get_height():
                 return dev
         return None
@@ -788,10 +817,22 @@ class AccWindow(Gtk.ApplicationWindow):
         menu.popup()
 
     def _launch(self, uri):
+        """Open uri with the desktop's handler; xdg-open is the fallback for
+        desktops GIO does not know (KDE handles smb:// through kde-open)."""
         try:
             Gio.AppInfo.launch_default_for_uri(uri, None)
+            return
         except GLib.Error as exc:
-            self.set_status(f"Could not open {uri}: {exc.message}")
+            reason = exc.message
+        try:
+            subprocess.Popen(["xdg-open", uri], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return
+        except OSError:
+            pass
+        if uri.startswith("smb://"):
+            reason = SHARES_HINT
+        self.set_status(f"Could not open {uri}: {reason}", sticky=True)
 
     def _open(self, dev):
         if dev is None:
@@ -898,9 +939,10 @@ class AccWindow(Gtk.ApplicationWindow):
         about = Gtk.AboutDialog(
             transient_for=self, modal=True,
             program_name="Asustor ACC for Linux",
-            version=self.acc_version,
+            version=GUI_VERSION if GUI_VERSION != "dev" else (self.acc_version or "dev"),
             comments="Unofficial Linux version of the ASUSTOR Control Center: "
-                     "NAS discovery, ADM launcher and Wake-on-LAN.",
+                     "NAS discovery, ADM launcher and Wake-on-LAN.\n\n"
+                     f"acc-gui {GUI_VERSION} · acc {self.acc_version or '?'} at {ACC_PATH}",
             website=WEBSITE,
             license_type=Gtk.License.MIT_X11,
         )
@@ -930,7 +972,7 @@ class AccWindow(Gtk.ApplicationWindow):
     def _set_hint(self):
         if self.compact:
             self.status.set_text(self.summary)
-        elif self.store.get_n_items():
+        elif self.sorted.get_n_items():
             self.status.set_text("Double-click a NAS to open ADM. Right-click for more.")
         else:
             self.status.set_text("Press Scan to search for ASUSTOR NAS devices.")
@@ -977,4 +1019,7 @@ class AccApp(AppBase):
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv[1:]:
+        print(f"acc-gui {GUI_VERSION}")
+        sys.exit(0)
     sys.exit(AccApp().run(sys.argv))

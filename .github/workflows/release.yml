@@ -36,6 +36,8 @@ jobs:
           mkdir -p stage/usr/bin stage/usr/share/applications
           install -m755 acc stage/usr/bin/acc
           install -m755 gui/acc-gui.py stage/usr/bin/acc-gui
+          sed -i "s/^GUI_VERSION = \"dev\"/GUI_VERSION = \"${VERSION}\"/" stage/usr/bin/acc-gui
+          grep -q "^GUI_VERSION = \"${VERSION}\"" stage/usr/bin/acc-gui
           for s in 48 64 128 256 512; do
             install -Dm644 "assets/icon-$s.png" \
               "stage/usr/share/icons/hicolor/${s}x${s}/apps/io.github.moringa303.AsustorAcc.png"
@@ -50,6 +52,7 @@ jobs:
           Architecture: amd64
           Maintainer: Asustor ACC for Linux contributors
           Depends: python3-gi, gir1.2-gtk-4.0, xdg-utils
+          Recommends: gvfs-backends
           Section: net
           Priority: optional
           Description: Native ASUSTOR NAS discovery and management for Linux
@@ -68,6 +71,7 @@ jobs:
           Summary: Native ASUSTOR NAS discovery and management for Linux
           License: MIT
           Requires: python3-gobject, gtk4, xdg-utils
+          Recommends: gvfs-smb
           %description
           Unofficial Linux version of ASUSTOR Control Center: mDNS discovery, ADM web UI
           launcher, Wake-on-LAN. CLI (acc) plus GTK4 GUI (acc-gui).
