@@ -1,0 +1,23 @@
+name: maintenance
+# One-off repository maintenance, run by hand from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      disable_app_check_suites:
+        description: "GitHub App id whose automatic check suites get switched off (shows as a queued check on every commit)"
+        required: true
+permissions:
+  checks: write
+jobs:
+  check-suite-preferences:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Disable automatic check suites for the app
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_ID: ${{ inputs.disable_app_check_suites }}
+        run: |
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/check-suites/preferences" \
+            --input - <<EOF
+          {"auto_trigger_checks":[{"app_id":${APP_ID},"setting":false}]}
+          EOF
