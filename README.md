@@ -1,8 +1,8 @@
 # Asustor ACC for Linux
 
 A Linux version of the ASUSTOR Control Center (ACC): find ASUSTOR NAS
-devices on your LAN, open the ADM web UI, send Wake-on-LAN, and see for
-how long each NAS has been online. Comes as a dependency-free CLI
+devices on your LAN, open the ADM web UI or the shared folders, send
+Wake-on-LAN, and see each NAS's uptime. Comes as a dependency-free CLI
 (`acc`) and a GTK4 GUI (`acc-gui`).
 
 > Unofficial community project. Not affiliated with, endorsed by, or
@@ -16,6 +16,20 @@ how long each NAS has been online. Comes as a dependency-free CLI
 ASUSTOR ships Control Center for Windows and macOS only. This project
 speaks the same discovery protocol, natively on Linux.
 
+## Download
+
+[![Latest release](https://img.shields.io/github/v/release/moringa303/asustor-acc-linux?label=latest%20release&style=for-the-badge)](https://github.com/moringa303/asustor-acc-linux/releases/latest)
+
+| Distribution | Package | Install |
+|---|---|---|
+| Debian, Ubuntu, Mint, Pop!_OS | [**asustor-acc-linux_amd64.deb**](https://github.com/moringa303/asustor-acc-linux/releases/latest/download/asustor-acc-linux_amd64.deb) | `sudo apt install ./asustor-acc-linux_amd64.deb` |
+| Fedora, RHEL, openSUSE | [**asustor-acc-linux.x86_64.rpm**](https://github.com/moringa303/asustor-acc-linux/releases/latest/download/asustor-acc-linux.x86_64.rpm) | `sudo dnf install ./asustor-acc-linux.x86_64.rpm` |
+| Arch, EndeavourOS, Manjaro, others | [**asustor-acc-linux-linux-amd64.tar.gz**](https://github.com/moringa303/asustor-acc-linux/releases/latest/download/asustor-acc-linux-linux-amd64.tar.gz) | extract, then `./install.sh` |
+| CLI only, any x86-64 Linux | [**acc**](https://github.com/moringa303/asustor-acc-linux/releases/latest/download/acc) (static binary) | `chmod +x acc && sudo install acc /usr/local/bin/` |
+
+Checksums: [SHA256SUMS](https://github.com/moringa303/asustor-acc-linux/releases/latest/download/SHA256SUMS).
+All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/releases).
+
 ## Features
 
 - `acc`: single static binary, works on any x86-64 Linux distribution:
@@ -25,24 +39,28 @@ speaks the same discovery protocol, natively on Linux.
   acc scan --json           # machine-readable output
   acc scan --all            # also list remembered devices that are offline
   acc scan --watch          # live view, rescans every 30 s
-  acc open  <name|ip|mac>   # open the ADM web UI in your browser
-  acc url   <name|ip|mac>   # print the ADM URL
-  acc wol   <name|ip|mac>   # send a Wake-on-LAN magic packet
+  acc open   <name|ip|mac>  # open the ADM web UI in your browser
+  acc shares <name|ip|mac>  # open the shared folders (smb://) in your file manager
+  acc url    <name|ip|mac>  # print the ADM URL
+  acc wol    <name|ip|mac>  # send a Wake-on-LAN magic packet
   acc doctor                # diagnose "no device found" problems
   ```
 
 - `acc-gui`: GTK4 front-end with the familiar device table
-  (Name / IP / Model / Serial / MAC / ADM / Port / State / Online), Scan,
-  Open ADM and Wake buttons, a right-click menu (copy the IP or MAC,
-  forget a device), sortable columns, and automatic refresh every 30
-  seconds. Offline devices stay in the list, dimmed, so you can wake them.
+  (Name / IP / Model / Serial / MAC / ADM / Port / State / Uptime), Scan,
+  Open ADM and Wake buttons, a right-click menu (open shared folders,
+  copy the IP or MAC, forget a device), sortable columns, and automatic
+  refresh every 30 seconds. The layout adapts to the window: a table
+  when it is wide enough for every column, a card list otherwise, never
+  a horizontal scrollbar or clipped text. Offline devices stay in the
+  list, dimmed, so you can wake them.
+
+- Uptime: read from the NAS via SNMP, shown in the CLI's UPTIME column
+  and the GUI's Uptime column (see [Uptime](#uptime)).
 
 - Device memory: `acc` remembers every NAS it has seen. A NAS that is
   asleep can still be woken with `acc wol <name>` or the GUI's Wake
   button, and shows up as Offline with the time it was last seen.
-
-- Online time: for every NAS, for how long it has answered every scan
-  without a miss (the ONLINE column; see [Online time](#online-time)).
 
 - `acc doctor`: mDNS health check that tells you whether nothing answers
   because of your firewall, your network topology, or a local mDNS daemon
@@ -52,10 +70,10 @@ speaks the same discovery protocol, natively on Linux.
 
 ### From a release
 
-Download the latest release asset for your distro:
+Use the links under [Download](#download):
 
-- Debian / Ubuntu: `sudo apt install ./asustor-acc-linux_*_amd64.deb`
-- Fedora: `sudo dnf install ./asustor-acc-linux-*.x86_64.rpm`
+- Debian / Ubuntu: `sudo apt install ./asustor-acc-linux_amd64.deb`
+- Fedora: `sudo dnf install ./asustor-acc-linux.x86_64.rpm`
 - Arch / EndeavourOS and others: extract the `.tar.gz`, run `./install.sh`
 
 ### From source
@@ -78,7 +96,7 @@ Requires Go 1.25 or newer. No cgo, no system libraries.
 go build ./...                                          # build everything
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
     -o acc ./cmd/acc                                    # static release binary
-go vet ./...                                            # checks
+go vet ./... && go test ./...                           # checks
 ```
 
 The GUI is a single Python script and needs no build step; it requires
@@ -95,6 +113,7 @@ acc <command> [options] [argument]
 |---|---|
 | `scan` | Discover NAS devices on the LAN and print a table |
 | `open <name\|ip\|mac>` | Open the ADM web UI (or setup wizard) in the browser |
+| `shares <name\|ip\|mac>` | Open the NAS's shared folders (`smb://<ip>/`) in the file manager |
 | `url <name\|ip\|mac>` | Print the ADM URL |
 | `wol <name\|ip\|mac>` | Send a Wake-on-LAN magic packet; works for a sleeping NAS that `acc` has seen before |
 | `forget <name\|ip\|mac>` | Drop a NAS from the device memory (`--all`: every one) |
@@ -109,6 +128,8 @@ acc <command> [options] [argument]
 | `--interval <seconds>` | Rescan interval for `--watch` (default 30) |
 | `--timeout <seconds>` | How long to listen for answers (default 4) |
 | `--iface <name>` | Restrict scanning and Wake-on-LAN to one network interface |
+| `--community <string>` | SNMP community used to read the uptime (default `public`, or `$ACC_SNMP_COMMUNITY`) |
+| `--no-snmp` | Do not ask the NAS for its uptime |
 | `--verbose`, `-v` | Explain what is going on, on stderr |
 
 Examples:
@@ -117,6 +138,7 @@ Examples:
 acc scan --timeout 8 --iface eth0
 acc scan --all              # includes offline devices and when they were last seen
 acc open mynas              # device name as shown by `acc scan`
+acc shares mynas            # smb://<ip>/ in your file manager
 acc wol mynas               # no scan needed: the MAC comes from the device memory
 acc wol 00:11:32:aa:bb:cc
 acc-gui                     # GUI; also available from the app menu
@@ -126,16 +148,15 @@ To try it without hardware, run `go run ./cmd/fakenas` (add `-init` for
 an uninitialized NAS, `-name`/`-model`/`-mac` for a second one) in one
 terminal and `go run ./cmd/acc scan` in another.
 
-### Online time
+### Uptime
 
-ADM does not announce its uptime, so `acc` keeps track itself. The
-ONLINE column (Online in the GUI) is for how long the NAS has answered
-every scan, counted from the first scan of an unbroken run. A scan that
-gets no answer ends the run; `acc` looks a second time before concluding
-that, because mDNS answers do get lost occasionally. With `acc scan
---watch` or the GUI's automatic refresh this is a live "reachable for"
-counter; with occasional manual scans it means "present at every scan
-since". Offline devices show when they were last seen instead.
+The discovery protocol does not carry the uptime, so `acc` asks the NAS
+over SNMP: `hrSystemUptime` (HOST-RESOURCES-MIB), falling back to
+`sysUpTime`. For that, enable SNMP on the NAS once: ADM › Services ›
+SNMP, tick SNMP v1/v2c, community `public` (or pass yours with
+`--community`). Without SNMP the column shows `-` and everything else
+works as before. The query runs alongside discovery, so a NAS without
+SNMP does not slow the scan down; `--no-snmp` turns it off entirely.
 
 The device memory lives in `~/.cache/asustor-acc/devices.json`
 (`$XDG_CACHE_HOME`). `acc forget` removes entries; devices not seen for
@@ -171,6 +192,9 @@ avahi-daemon at the same time and merges both answers, because a daemon
 that owns the mDNS socket swallows the unicast replies a standalone
 listener would need. Hosts with IPv6 disabled are scanned over IPv4.
 
+Uptime comes from a single SNMP GET (v2c, then v1) to UDP port 161 of
+the NAS; `acc` carries its own minimal SNMP client, no library needed.
+
 Wake-on-LAN sends the magic packet to the limited broadcast address, to
 the directed broadcast of every interface (or only `--iface`), and to the
 last known address of the NAS, so a NAS on a second network card is
@@ -197,7 +221,7 @@ app bundles a driver for what the kernel already provides.
 
 ## Development
 
-- `cmd/acc/`: Go CLI (discovery, device memory, doctor, WOL)
+- `cmd/acc/`: Go CLI (discovery, device memory, SNMP uptime, doctor, WOL)
 - `cmd/fakenas/`: advertises a fake NAS over mDNS so everything is
   testable without hardware. `go run ./cmd/fakenas` in one terminal,
   `acc scan` in another. `-init` advertises a factory-fresh NAS.
@@ -205,6 +229,8 @@ app bundles a driver for what the kernel already provides.
   from the checkout with `ACC_BIN=./acc python3 gui/acc-gui.py`.
 - `assets/icon.svg`: icon source, rendered to the PNG sizes with
   `rsvg-convert`
+- `go test ./...` runs the unit tests; CI runs them with `go vet`,
+  `gofmt`, `staticcheck` and `pyflakes` on every push.
 
 The discovery protocol was determined by inspecting the official Control
 Center's scanner library. No ASUSTOR code or assets are included in this
