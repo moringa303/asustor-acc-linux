@@ -1,16 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <!-- Asustor ACC for Linux app icon (MIT, original work, not derived from
-       ASUSTOR artwork): a hard disk drive in thin line art on dark grey. -->
+       ASUSTOR artwork): a storage stack (three platters) in thin line art
+       on dark grey. -->
   <rect x="8" y="8" width="496" height="496" rx="112" fill="#202124"
         stroke="#ffffff" stroke-opacity="0.1" stroke-width="4"/>
 
-  <!-- drive body and platter -->
   <g fill="none" stroke="#e6ecf5" stroke-width="16" stroke-linejoin="round" stroke-linecap="round">
-    <rect x="96" y="176" width="320" height="160" rx="28"/>
-    <circle cx="196" cy="256" r="52"/>
+    <!-- top platter -->
+    <ellipse cx="256" cy="168" rx="120" ry="40"/>
+    <!-- sides -->
+    <path d="M 136 168 V 344 M 376 168 V 344"/>
+    <!-- visible front curve of the middle and bottom platters -->
+    <path d="M 136 256 A 120 40 0 0 0 376 256"/>
+    <path d="M 136 344 A 120 40 0 0 0 376 344"/>
   </g>
-  <!-- spindle hub -->
-  <circle cx="196" cy="256" r="10" fill="#e6ecf5"/>
-  <!-- activity LED -->
-  <circle cx="366" cy="256" r="10" fill="#22d3ee"/>
+  <!-- activity LED on the bottom platter -->
+  <circle cx="340" cy="312" r="9" fill="#22d3ee"/>
 </svg>
