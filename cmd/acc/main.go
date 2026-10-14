@@ -14,6 +14,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -43,7 +44,7 @@ func printTable(list []Nas, now time.Time) {
 		return
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tIP\tMODEL\tSERIAL\tMAC\tADM\tPORT\tSTATE\tONLINE")
+	fmt.Fprintln(tw, "NAME\tIP\tMODEL\tSERIAL\tMAC\tADM\tPORT\tSTATE\tUPTIME")
 	for _, n := range list {
 		state, port := n.State, ""
 		if !n.Online {
@@ -53,36 +54,43 @@ func printTable(list []Nas, now time.Time) {
 			port = strconv.Itoa(n.Port)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			n.Name, n.IP, n.Model, n.SerialNumber, n.MAC, n.ADMVersion, port, state, formatOnline(n, now))
+			n.Name, n.IP, n.Model, n.SerialNumber, n.MAC, n.ADMVersion, port, state, formatUptime(n, now))
 	}
 	tw.Flush()
 }
 
-// formatOnline renders the ONLINE column: for how long the NAS has
-// answered every scan, or when it was last seen.
-func formatOnline(n Nas, now time.Time) string {
-	if n.Online {
-		return formatDuration(now.Sub(n.OnlineSince))
-	}
-	if n.LastSeen.IsZero() {
+// formatUptime renders the UPTIME column: the uptime the NAS reported
+// over SNMP, "-" for an online NAS that reported none, or when an offline
+// NAS was last seen.
+func formatUptime(n Nas, now time.Time) string {
+	switch {
+	case n.Online && n.UptimeSeconds != nil:
+		return formatDuration(time.Duration(*n.UptimeSeconds) * time.Second)
+	case n.Online:
+		return "-"
+	case n.LastSeen.IsZero():
 		return "never seen"
 	}
 	return "last seen " + formatSeen(n.LastSeen, now)
 }
 
+// formatDuration renders d down to the minute ("3d 4h 12m"), or to the
+// second under an hour ("12m 05s").
 func formatDuration(d time.Duration) string {
 	d = d.Round(time.Second)
+	secs := int64(d / time.Second)
+	days, hours, mins := secs/86400, secs/3600%24, secs/60%60
 	switch {
 	case d < 0:
 		return "0s"
 	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
+		return fmt.Sprintf("%ds", secs)
 	case d < time.Hour:
-		return fmt.Sprintf("%dm %02ds", int(d.Minutes()), int(d.Seconds())%60)
+		return fmt.Sprintf("%dm %02ds", mins, secs%60)
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
+		return fmt.Sprintf("%dh %02dm", hours, mins)
 	}
-	return fmt.Sprintf("%dd %dh", int(d.Hours())/24, int(d.Hours())%24)
+	return fmt.Sprintf("%dd %dh %02dm", days, hours, mins)
 }
 
 func formatSeen(t, now time.Time) string {
@@ -103,13 +111,15 @@ func onlineOnly(list []Nas) []Nas {
 	return out
 }
 
-func printJSON(list []Nas) {
+func printJSON(list []Nas, indent bool) error {
 	if list == nil {
 		list = []Nas{}
 	}
 	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	enc.Encode(list)
+	if indent {
+		enc.SetIndent("", "  ")
+	}
+	return enc.Encode(list)
 }
 
 // watchScan rescans every interval and redraws the table in place.
@@ -121,10 +131,11 @@ func watchScan(timeout, interval time.Duration, all, asJSON bool) {
 		}
 		now := time.Now()
 		if asJSON {
+			if err == nil {
+				err = printJSON(list, false)
+			}
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "acc:", err)
-			} else {
-				json.NewEncoder(os.Stdout).Encode(list)
 			}
 		} else {
 			fmt.Print("\033[H\033[2J")
@@ -140,11 +151,26 @@ func watchScan(timeout, interval time.Duration, all, asJSON bool) {
 	}
 }
 
-func openBrowser(url string) error {
+// xdgOpen hands url to the desktop's default handler; what names the
+// kind of program expected, for the error message.
+func xdgOpen(url, what string) error {
 	if err := exec.Command("xdg-open", url).Start(); err != nil {
-		return fmt.Errorf("cannot start a browser (%w); open %s yourself", err, url)
+		return fmt.Errorf("cannot start a %s (%w); open %s yourself", what, err, url)
 	}
 	return nil
+}
+
+// maxSeconds bounds --timeout and --interval; beyond it the value would
+// not fit a time.Duration anyway.
+const maxSeconds = 1e6
+
+// parseSeconds parses the value of a duration option given in seconds.
+func parseSeconds(flag, s string) (time.Duration, error) {
+	secs, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(secs) || secs <= 0 || secs > maxSeconds {
+		return 0, fmt.Errorf("%s wants a positive number of seconds, not %q", flag, s)
+	}
+	return time.Duration(secs * float64(time.Second)), nil
 }
 
 func usage() {
@@ -154,6 +180,7 @@ Commands:
   scan                   discover ASUSTOR NAS devices via mDNS
   open <name|ip|mac>     open the NAS web UI (ADM) in the browser
   url <name|ip|mac>      print the NAS web UI URL
+  shares <name|ip|mac>   open the shared folders (smb://<ip>/) in the file manager
   wol <name|ip|mac>      send a Wake-on-LAN magic packet; works for a
                          sleeping NAS that acc has seen before
   forget <name|ip|mac>   drop a NAS from acc's device memory (--all: every one)
@@ -167,10 +194,14 @@ Options:
   --interval <seconds>   rescan interval for --watch (default 30)
   --timeout <seconds>    how long to listen for answers (default 4)
   --iface <name>         restrict scanning and Wake-on-LAN to one interface
+  --community <string>   SNMP read community (default "public", or $ACC_SNMP_COMMUNITY)
+  --no-snmp              do not ask the devices for their uptime
   --verbose, -v          explain what is going on, on stderr
 
-The ONLINE column is for how long the NAS has answered every scan without
-a miss, as observed by acc; ADM does not announce its uptime.
+The UPTIME column is what the NAS reports over SNMP, which has to be
+enabled in ADM > Services > SNMP (v1/v2c with the read community given
+above); without it the column shows "-". Offline devices show when they
+were last seen.
 `)
 	os.Exit(2)
 }
@@ -189,16 +220,17 @@ func main() {
 		all        bool
 		watch      bool
 	)
+	snmpCommunity = defaultCommunity()
 	fail := func(err error) {
 		fmt.Fprintln(os.Stderr, "acc:", err)
 		os.Exit(1)
 	}
 	seconds := func(flag, s string) time.Duration {
-		secs, err := strconv.ParseFloat(s, 64)
-		if err != nil || secs <= 0 {
-			fail(fmt.Errorf("%s wants a positive number of seconds, not %q", flag, s))
+		d, err := parseSeconds(flag, s)
+		if err != nil {
+			fail(err)
 		}
-		return time.Duration(secs * float64(time.Second))
+		return d
 	}
 	for i := 0; i < len(args); i++ {
 		consumed := 1
@@ -209,9 +241,11 @@ func main() {
 			all = true
 		case "--watch":
 			watch = true
+		case "--no-snmp":
+			snmpDisabled = true
 		case "--verbose", "-v":
 			verbose = true
-		case "--iface", "--timeout", "--interval":
+		case "--iface", "--timeout", "--interval", "--community":
 			if i+1 >= len(args) {
 				usage()
 			}
@@ -226,6 +260,8 @@ func main() {
 				timeout, timeoutSet = seconds("--timeout", args[i+1]), true
 			case "--interval":
 				interval = seconds("--interval", args[i+1])
+			case "--community":
+				snmpCommunity = args[i+1]
 			}
 		case "--help", "-h":
 			usage()
@@ -261,11 +297,13 @@ func main() {
 			list = onlineOnly(list)
 		}
 		if asJSON {
-			printJSON(list)
+			if err := printJSON(list, true); err != nil {
+				fail(err)
+			}
 		} else {
 			printTable(list, time.Now())
 		}
-	case "open", "url":
+	case "open", "url", "shares":
 		if len(args) != 1 {
 			usage()
 		}
@@ -273,18 +311,22 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		if nas.URL == "" {
+		url, what := nas.URL, "browser"
+		if cmd == "shares" {
+			url, what = nas.SharesURL, "file manager"
+		}
+		if url == "" {
 			fail(fmt.Errorf("%s did not report an address", nas.Name))
 		}
 		if cmd == "url" {
-			fmt.Println(nas.URL)
+			fmt.Println(url)
 			return
 		}
 		if !nas.Online {
 			fail(fmt.Errorf("%s is not answering (last seen %s); wake it with 'acc wol %s'",
 				nas.Name, formatSeen(nas.LastSeen, time.Now()), nas.Name))
 		}
-		if err := openBrowser(nas.URL); err != nil {
+		if err := xdgOpen(url, what); err != nil {
 			fail(err)
 		}
 	case "wol":

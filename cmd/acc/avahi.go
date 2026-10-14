@@ -46,31 +46,9 @@ func avahiScan(timeout time.Duration) ([]Nas, bool) {
 			}
 			ran = true
 			for _, line := range strings.Split(string(out), "\n") {
-				f := strings.Split(line, ";")
-				// =;iface;proto;instance;type;domain;hostname;address;port;"k=v" "k=v"
-				if len(f) < 10 || f[0] != "=" {
+				nas, iface, ok := parseAvahiLine(line, svc.initialized)
+				if !ok || (ifaceName != "" && iface != ifaceName) {
 					continue
-				}
-				if ifaceName != "" && f[1] != ifaceName {
-					continue
-				}
-				nas := Nas{
-					Name:        avahiUnescape(f[3]),
-					Initialized: svc.initialized,
-				}
-				if strings.Contains(f[7], ":") {
-					nas.IPv6 = f[7]
-				} else {
-					nas.IP = f[7]
-				}
-				nas.Port, _ = strconv.Atoi(f[8])
-				nas.applyTxt(parseAvahiTxt(strings.Join(f[9:], ";")))
-				if nas.State == "" {
-					if svc.initialized {
-						nas.State = "Ready"
-					} else {
-						nas.State = "Uninitialized"
-					}
 				}
 				vlog("avahi answer: %s (%s) via %s", nas.Name, nas.IP, svc.name)
 				mergeNas(found, nas)
@@ -79,6 +57,39 @@ func avahiScan(timeout time.Duration) ([]Nas, bool) {
 	}
 	wg.Wait()
 	return sortedByName(found), ran
+}
+
+// parseAvahiLine turns one resolved line of `avahi-browse --parsable`
+// output into a NAS record and names the interface it was seen on. Other
+// lines (browse events, "all for now") yield ok == false.
+func parseAvahiLine(line string, initialized bool) (nas Nas, iface string, ok bool) {
+	f := strings.Split(line, ";")
+	// =;iface;proto;instance;type;domain;hostname;address;port;"k=v" "k=v"
+	if len(f) < 10 || f[0] != "=" {
+		return Nas{}, "", false
+	}
+	nas = Nas{
+		Name:        avahiUnescape(f[3]),
+		Initialized: initialized,
+	}
+	if strings.Contains(f[7], ":") {
+		nas.IPv6 = f[7]
+	} else {
+		nas.IP = f[7]
+	}
+	if port, err := strconv.Atoi(f[8]); err == nil && port > 0 && port <= 65535 {
+		nas.Port = port
+	}
+	// TXT values may themselves contain the field separator.
+	nas.applyTxt(parseAvahiTxt(strings.Join(f[9:], ";")))
+	if nas.State == "" {
+		if initialized {
+			nas.State = "Ready"
+		} else {
+			nas.State = "Uninitialized"
+		}
+	}
+	return nas, f[1], true
 }
 
 // avahiUnescape decodes avahi's \ddd decimal escapes (e.g. \032 = space).
