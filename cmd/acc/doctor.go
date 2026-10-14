@@ -88,7 +88,12 @@ func doctor(timeout time.Duration) {
 		mdnsQuery("_ASUSTOR_INIT._tcp.local"),
 	}
 	for _, q := range queries {
-		pconn.WriteTo(q, dst)
+		// A query that cannot even leave would make "no traffic at all"
+		// below point at the wrong culprit.
+		if _, err := pconn.WriteTo(q, dst); err != nil {
+			fmt.Printf("  warning: cannot send mDNS query: %v\n", err)
+			break
+		}
 	}
 	// Re-send once mid-listen; mDNS responders may rate-limit.
 	go func() {
