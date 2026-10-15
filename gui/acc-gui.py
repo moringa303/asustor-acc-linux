@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from datetime import datetime
 
 import gi
@@ -63,11 +64,48 @@ APP_FULL_NAME = f"{APP_NAME} for Linux"
 # Must match the installed .desktop file name and the hicolor icon name,
 # or GNOME shows a generic gear icon for the window.
 APP_ID = "io.github.moringa303.AsustorAcc"
-# The accent colour: kiwi green. KIWI is the fill (dark text on it),
-# KIWI_DEEP the same green for small marks on a light background.
-KIWI = "#9EE12F"
-KIWI_DEEP = "#86CC1E"
+# Accent colours: (fill, deep). The fill carries dark text (the main
+# button, the "for Linux" pill, the stripe); deep is the same hue for
+# small marks (the Ready dot, the LED of the model glyphs). Kiwi green
+# is the default; the choice is remembered in the settings file.
+ACCENTS = {
+    "Kiwi": ("#9EE12F", "#86CC1E"),
+    "Cyan": ("#3DDCEB", "#1FB8C8"),
+    "Amber": ("#FFC233", "#E0A416"),
+    "Coral": ("#FF7A66", "#E85B46"),
+    "Violet": ("#B98CFF", "#9A6BEA"),
+}
+ACCENT = {"name": "Kiwi", "fill": ACCENTS["Kiwi"][0], "deep": ACCENTS["Kiwi"][1]}
 WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
+
+# Remembered choices: automatic refresh, offline devices, the accent.
+SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "asustor-acc", "gui.json")
+DEFAULT_SETTINGS = {"auto_refresh": False, "show_offline": True, "accent": "Kiwi"}
+
+
+def load_settings():
+    settings = dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            settings.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
+    except (OSError, ValueError):
+        pass
+    if settings["accent"] not in ACCENTS:
+        settings["accent"] = DEFAULT_SETTINGS["accent"]
+    return settings
+
+
+def save_settings(settings):
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        tmp = SETTINGS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+        os.replace(tmp, SETTINGS_FILE)
+    except OSError as exc:
+        print(f"acc-gui: cannot save {SETTINGS_FILE}: {exc}", file=sys.stderr)
 
 SCAN_TIMEOUT = 6  # seconds acc listens for answers
 REFRESH_SECONDS = int(os.environ.get("ACC_GUI_REFRESH", "30"))
@@ -106,9 +144,10 @@ COLUMNS = [
 ]
 TABULAR = {"ip", "serial", "mac", "adm", "port"}
 # Fixed widths (px) for the columns that may shorten with an ellipsis
-# when the window is narrow; Model and State are always shown whole, Name
-# takes the rest. Tooltips carry the full text.
-FIXED_WIDTHS = {"ip": 150, "serial": 150, "mac": 150, "adm": 100, "port": 56}
+# when the window is narrow; Model, ADM and State are always shown whole
+# (WHOLE), Name takes the rest. Tooltips carry the full text.
+FIXED_WIDTHS = {"ip": 150, "serial": 150, "mac": 150, "port": 56}
+WHOLE = {"model", "adm", "state"}
 
 STATE_CLASSES = {
     "Ready": "ready",
@@ -182,38 +221,73 @@ def model_links(model):
     template = override.get("compat") or links.get("compat") or templates[media.lower()]
     return template.format(model=base, media=media), media
 
-CSS = f"""
-.state-dot {{ min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }}
-.state-dot.ready {{ background: {KIWI_DEEP}; }}
-.state-dot.uninitialized {{ background: #3584e4; }}
-.state-dot.notready {{ background: #e5a50a; }}
-.state-dot.offline {{ background: #9a9996; }}
-columnview > listview > row > cell {{ padding: 7px 8px; }}
+CSS = """
+.state-dot, .port-dot { min-width: 10px; min-height: 10px; border-radius: 5px; background: #9a9996; }
+.state-dot.uninitialized { background: #3584e4; }
+.state-dot.notready, .port-dot.filtered { background: #e5a50a; }
+.state-dot.offline, .port-dot.closed { background: #9a9996; }
+columnview > listview > row > cell { padding: 7px 8px; }
 /* The last column stays clear of the overlay scrollbar. */
-columnview > listview > row > cell:last-child {{ padding-right: 24px; }}
-listview.cards > row {{ padding: 8px 12px; }}
-.card-name {{ font-weight: bold; }}
-.tabular {{ font-variant-numeric: tabular-nums; }}
-.empty-title {{ font-size: 1.4em; font-weight: bold; }}
-.statusbar {{ padding: 6px 12px; }}
-/* Kiwi green accents: the stripe under the header bar, the "for Linux"
-   pill of the title, the main action button, the empty page's icon. */
-.kiwi-stripe {{ min-height: 3px; background: {KIWI}; }}
-.pill {{ background: {KIWI}; color: #15200a; border-radius: 999px; padding: 1px 8px;
-         font-size: 0.72em; font-weight: bold; }}
-button.kiwi {{ background-color: {KIWI}; background-image: none; color: #15200a; }}
-button.kiwi:hover {{ background-color: #b3ea55; }}
-button.kiwi:active, button.kiwi:checked {{ background-color: {KIWI_DEEP}; }}
-button.kiwi:disabled {{ background-color: alpha({KIWI}, 0.35); color: alpha(#15200a, 0.5); }}
-.kiwi-icon {{ color: {KIWI_DEEP}; }}
-progressbar.kiwi trough {{ min-height: 3px; border: none; border-radius: 0; background: alpha({KIWI}, 0.25); }}
-progressbar.kiwi progress {{ min-height: 3px; border: none; border-radius: 0; background: {KIWI}; }}
+columnview > listview > row > cell:last-child { padding-right: 24px; }
+listview.cards > row { padding: 8px 12px; }
+.card-name { font-weight: bold; }
+.tabular { font-variant-numeric: tabular-nums; }
+.empty-title { font-size: 1.4em; font-weight: bold; }
+.statusbar { padding: 6px 12px; }
+/* Short fades instead of hard switches: hover and selection of a row,
+   a device dimming when it goes offline, a dot changing colour. */
+columnview > listview > row, listview.cards > row, list > row {
+    transition: background-color 120ms ease-out; }
+columnview > listview > row label, listview.cards > row label {
+    transition: color 150ms ease-out, opacity 150ms ease-out; }
+.state-dot, .port-dot { transition: background-color 200ms ease-out; }
 """
 
+# The accent part of the stylesheet, regenerated when the accent changes:
+# the stripe under the header bar, the "for Linux" pill, the main action
+# button, the empty page's icon, the Ready and open-port dots.
+ACCENT_CSS = """
+.accent-stripe { min-height: 3px; background: FILL; }
+.pill { background: FILL; color: #101418; border-radius: 999px; padding: 1px 8px;
+        font-size: 0.72em; font-weight: bold; }
+button.accent { background-color: FILL; background-image: none; color: #101418; }
+button.accent:hover { background-color: shade(FILL, 1.08); }
+button.accent:active, button.accent:checked { background-color: DEEP; }
+button.accent:disabled { background-color: alpha(FILL, 0.35); color: alpha(#101418, 0.5); }
+.accent-icon { color: DEEP; }
+.state-dot.ready, .port-dot.open { background: DEEP; }
+progressbar.accent trough { min-height: 3px; border: none; border-radius: 0; background: alpha(FILL, 0.25); }
+progressbar.accent progress { min-height: 3px; border: none; border-radius: 0; background: FILL; }
+"""
+_accent_provider = None
 
-def kiwi_stripe():
+
+def _load_css(provider, css):
+    if hasattr(provider, "load_from_string"):
+        provider.load_from_string(css)
+    else:
+        provider.load_from_data(css.encode())
+
+
+def apply_accent(name):
+    """Switch the accent colour app-wide: the stylesheet and the LEDs of
+    the model glyphs, which are drawn by hand."""
+    global _accent_provider
+    fill, deep = ACCENTS[name]
+    ACCENT.update(name=name, fill=fill, deep=deep)
+    if _accent_provider is None:
+        _accent_provider = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), _accent_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+    _load_css(_accent_provider, ACCENT_CSS.replace("FILL", fill).replace("DEEP", deep))
+    for glyph in list(ModelGlyph.instances):
+        glyph.queue_draw()
+
+
+def accent_stripe():
     stripe = Gtk.Box()
-    stripe.add_css_class("kiwi-stripe")
+    stripe.add_css_class("accent-stripe")
     return stripe
 
 
@@ -272,13 +346,15 @@ class ModelGlyph(Gtk.Widget):
 
     SIZE = 28
     LINE = 1.5
-    LED = 3  # the power LED, kiwi green while the NAS is online
+    LED = 3  # the power LED, in the accent colour while the NAS is online
+    instances = weakref.WeakSet()  # every glyph alive, for accent changes
 
     def __init__(self):
         super().__init__(valign=Gtk.Align.CENTER)
         self.set_size_request(self.SIZE, self.SIZE)
         self.bays, self.kind = 0, "tower"
         self.lit = False
+        ModelGlyph.instances.add(self)
 
     def set_model(self, model):
         shape = model_shape(model) if model else (0, "tower")
@@ -330,9 +406,9 @@ class ModelGlyph(Gtk.Widget):
                 slot(x + 4, y + 3 + gap * i + gap / 2 - line / 2, w - 8 - led - 1, line)
             led_x, led_y = x + w - 3 - led, y + h - 3 - led
         if self.lit:
-            kiwi = Gdk.RGBA()
-            kiwi.parse(KIWI_DEEP)
-            snapshot.append_color(kiwi, Graphene.Rect().init(led_x, led_y, led, led))
+            accent = Gdk.RGBA()
+            accent.parse(ACCENT["deep"])
+            snapshot.append_color(accent, Graphene.Rect().init(led_x, led_y, led, led))
 
 
 class Device(GObject.Object):
@@ -520,8 +596,10 @@ class AccWindow(Gtk.ApplicationWindow):
         self.set_default_size(1100, 560)
         self.set_size_request(MIN_WIDTH, 300)
         self.scanning = False
-        self.auto_refresh = True
-        self.show_offline = True
+        self.settings = load_settings()
+        self.auto_refresh = self.settings["auto_refresh"]
+        self.show_offline = self.settings["show_offline"]
+        apply_accent(self.settings["accent"])
         self.last_scan = None
         self.last_error = None
         self.acc_version = ""
@@ -554,6 +632,7 @@ class AccWindow(Gtk.ApplicationWindow):
             ("shares", self.open_shares),
             ("wake", self.wake_selected),
             ("ping", self.ping_selected),
+            ("ports", self.check_ports),
             ("compat-hdd", self.open_compat),
             ("compat-ssd", self.open_compat),
             ("copy-ip", lambda: self._copy("ip")),
@@ -572,13 +651,28 @@ class AccWindow(Gtk.ApplicationWindow):
                 name, None, GLib.Variant.new_boolean(getattr(self, attr)))
             action.connect("change-state", self._toggle, attr)
             self.add_action(action)
+        accent = Gio.SimpleAction.new_stateful(
+            "accent", GLib.VariantType("s"), GLib.Variant("s", self.settings["accent"]))
+        accent.connect("change-state", self._set_accent)
+        self.add_action(accent)
 
     def _toggle(self, action, value, attr):
         action.set_state(value)
         setattr(self, attr, value.get_boolean())
+        self.settings[attr] = value.get_boolean()
+        save_settings(self.settings)
         if attr == "show_offline":
             self.filter.changed(Gtk.FilterChange.DIFFERENT)
             self._refresh_summary()
+
+    def _set_accent(self, action, value):
+        name = value.get_string()
+        if name not in ACCENTS:
+            return
+        action.set_state(value)
+        self.settings["accent"] = name
+        apply_accent(name)
+        save_settings(self.settings)
 
     def _build_header(self):
         header = self.header = Gtk.HeaderBar()
@@ -619,11 +713,18 @@ class AccWindow(Gtk.ApplicationWindow):
         section.append("Open shared folders", "win.shares")
         section.append("Wake (WOL)", "win.wake")
         section.append("Ping", "win.ping")
+        section.append("Check services (ports)…", "win.ports")
         menu.append_section(None, section)
         menu.append_section(None, self._link_menu())
         section = Gio.Menu()
         section.append(f"Refresh every {REFRESH_SECONDS} s", "win.auto-refresh")
         section.append("Show offline devices", "win.show-offline")
+        accents = Gio.Menu()
+        for name in ACCENTS:
+            item = Gio.MenuItem.new(name, None)
+            item.set_action_and_target_value("win.accent", GLib.Variant("s", name))
+            accents.append_item(item)
+        section.append_submenu("Accent colour", accents)
         menu.append_section(None, section)
         section = Gio.Menu()
         section.append("Diagnose discovery…", "win.doctor")
@@ -637,7 +738,7 @@ class AccWindow(Gtk.ApplicationWindow):
         header.pack_end(menu_btn)
 
         self.open_btn = Gtk.Button(label="Open ADM", action_name="win.open")
-        self.open_btn.add_css_class("kiwi")
+        self.open_btn.add_css_class("accent")
         self.open_btn.set_tooltip_text("Open the web interface of the selected NAS (Ctrl+O)")
         header.pack_end(self.open_btn)
         self.wake_btn = Gtk.Button(label="Wake", action_name="win.wake")
@@ -721,6 +822,7 @@ class AccWindow(Gtk.ApplicationWindow):
         section.append("Open shared folders", "win.shares")
         section.append("Wake (WOL)", "win.wake")
         section.append("Ping", "win.ping")
+        section.append("Check services (ports)…", "win.ports")
         model.append_section(None, section)
         model.append_section(None, self._link_menu())
         section = Gio.Menu()
@@ -745,7 +847,9 @@ class AccWindow(Gtk.ApplicationWindow):
         # Horizontal scrollbars are never shown: the table is only used at
         # widths where every column fits, and the cards wrap their text.
         never = Gtk.PolicyType.NEVER
-        self.stack = Gtk.Stack(vexpand=True, hhomogeneous=False)
+        self.stack = Gtk.Stack(vexpand=True, hhomogeneous=False,
+                               transition_type=Gtk.StackTransitionType.CROSSFADE,
+                               transition_duration=150)
         self.table_page = Gtk.ScrolledWindow(child=self.view, hscrollbar_policy=never)
         self.stack.add_named(self.table_page, "table")
         self.stack.add_named(Gtk.ScrolledWindow(child=self.cards, hscrollbar_policy=never), "cards")
@@ -770,7 +874,7 @@ class AccWindow(Gtk.ApplicationWindow):
                                       | GObject.BindingFlags.SYNC_CREATE)
 
         box = ContentBox(self._classify_layout, self._apply_layout)
-        box.append(kiwi_stripe())
+        box.append(accent_stripe())
         box.append(self.search_bar)
         box.append(self.stack)
         box.append(Gtk.Separator())
@@ -784,7 +888,7 @@ class AccWindow(Gtk.ApplicationWindow):
                        margin_start=24, margin_end=24)
         icon = Gtk.Image.new_from_icon_name("network-server-symbolic")
         icon.set_pixel_size(96)
-        icon.add_css_class("kiwi-icon")
+        icon.add_css_class("accent-icon")
         self.empty_title = Gtk.Label(label="No ASUSTOR NAS found", wrap=True,
                                      justify=Gtk.Justification.CENTER)
         self.empty_title.add_css_class("empty-title")
@@ -792,7 +896,7 @@ class AccWindow(Gtk.ApplicationWindow):
         self.empty_text.add_css_class("dim-label")
         buttons = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER, margin_top=12)
         again = Gtk.Button(label="Scan again", action_name="win.scan")
-        again.add_css_class("kiwi")
+        again.add_css_class("accent")
         buttons.append(again)
         buttons.append(Gtk.Button(label="Diagnose discovery…", action_name="win.doctor"))
         for w in (icon, self.empty_title, self.empty_text, buttons):
@@ -835,14 +939,14 @@ class AccWindow(Gtk.ApplicationWindow):
     # -- table cells -----------------------------------------------------
     def _setup_cell(self, _factory, item, prop):
         # Cells ellipsize so the table fits any width from TABLE_WIDTH up;
-        # the tooltip carries the full text. Model and State are always
-        # shown whole (the table gives way to the cards instead).
-        whole = prop in ("model", "state")
+        # the tooltip carries the full text. Model, ADM and State are
+        # always shown whole (the table gives way to the cards instead).
+        whole = prop in WHOLE
         label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.NONE if whole
                           else Pango.EllipsizeMode.END)
         if prop in TABULAR:
             label.add_css_class("tabular")
-        if not whole:
+        if not whole or prop == "adm":
             item.set_child(label)
             return
         box = Gtk.Box(spacing=8)
@@ -1136,6 +1240,7 @@ class AccWindow(Gtk.ApplicationWindow):
             dev is not None and dev.online and bool(dev.shares_url))
         self.lookup_action("wake").set_enabled(dev is not None and bool(dev.mac))
         self.lookup_action("ping").set_enabled(dev is not None and bool(dev.ip))
+        self.lookup_action("ports").set_enabled(dev is not None and bool(dev.ip))
         has_model = dev is not None and bool(dev.model)
         media = model_links(dev.model)[1] if has_model else ""
         self.lookup_action("compat-hdd").set_enabled(has_model and media == "HDD")
@@ -1284,6 +1389,12 @@ class AccWindow(Gtk.ApplicationWindow):
             return
         self.set_status(f"Opening the {title}…")
         WebWindow(self, compat, title).present()
+
+    def check_ports(self):
+        dev = self.selected()
+        if dev is None or not dev.ip:
+            return
+        PortsWindow(self, dev).present()
 
     def ping_selected(self):
         dev = self.selected()
@@ -1434,6 +1545,105 @@ class AccWindow(Gtk.ApplicationWindow):
             self._status_timer = GLib.timeout_add_seconds(8, self._set_hint)
 
 
+class PortsWindow(Gtk.Window):
+    """Which services of a NAS answer: the result of `acc ports`, one row
+    per well-known port with a dot (accent: open, grey: closed, amber:
+    filtered). A single list, so it works at any width."""
+
+    def __init__(self, parent, dev):
+        super().__init__(title=f"Services of {dev.name}", application=parent.get_application(),
+                         default_width=520, default_height=640)
+        self.set_size_request(MIN_WIDTH, 300)
+        self.set_icon_name(APP_ID)
+        self.parent_window, self.ip = parent, dev.ip
+        self.checking = False
+
+        header = Gtk.HeaderBar()
+        self.set_titlebar(header)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        title = Gtk.Label(label=f"Services of {dev.name}", ellipsize=Pango.EllipsizeMode.END)
+        title.add_css_class("title")
+        address = Gtk.Label(label=dev.ip)
+        address.add_css_class("subtitle")
+        titles.append(title)
+        titles.append(address)
+        header.set_title_widget(titles)
+        again = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Check again (F5)")
+        again.connect("clicked", lambda *_: self.check())
+        header.pack_start(again)
+        self.spinner = Gtk.Spinner()
+        header.pack_start(self.spinner)
+
+        self.rows = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,
+                                margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        self.rows.add_css_class("boxed-list" if Adw else "rich-list")
+        self.summary = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+        self.summary.add_css_class("dim-label")
+        self.summary.add_css_class("statusbar")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(accent_stripe())
+        box.append(Gtk.ScrolledWindow(child=self.rows, vexpand=True,
+                                      hscrollbar_policy=Gtk.PolicyType.NEVER))
+        box.append(Gtk.Separator())
+        box.append(self.summary)
+        self.set_child(box)
+
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._key)
+        self.add_controller(keys)
+        self.check()
+
+    def check(self):
+        if self.checking:
+            return
+        self.checking = True
+        self.spinner.start()
+        self.summary.set_text(f"Checking the well-known ports of {self.ip}… "
+                              "(a connection attempt per port, nothing is sent)")
+        self.parent_window._run_acc(["ports", self.ip, "--json"], self._done)
+
+    def _done(self, out, err):
+        self.checking = False
+        self.spinner.stop()
+        while (row := self.rows.get_row_at_index(0)) is not None:
+            self.rows.remove(row)
+        try:
+            results = json.loads(out) if out else None
+        except ValueError:
+            results = None
+        if not isinstance(results, list) or not results:
+            self.summary.set_text(f"Could not check {self.ip}: {err or 'acc gave no output'}")
+            return
+        open_count = 0
+        for r in results:
+            state = str(r.get("state") or "")
+            open_count += state == "open"
+            row = Gtk.Box(spacing=10, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
+            dot = Gtk.Box(valign=Gtk.Align.CENTER)
+            dot.add_css_class("port-dot")
+            dot.add_css_class(state)
+            port = Gtk.Label(label=str(r.get("port") or ""), xalign=1, width_chars=5)
+            port.add_css_class("tabular")
+            service = Gtk.Label(label=str(r.get("service") or ""), xalign=0, hexpand=True,
+                                ellipsize=Pango.EllipsizeMode.END)
+            label = Gtk.Label(label=state)
+            label.add_css_class("dim-label")
+            for w in (dot, port, service, label):
+                row.append(w)
+            self.rows.append(row)
+        self.summary.set_text(f"{open_count} of {len(results)} services answer. Closed: nothing "
+                              "listens on that port. Filtered: no answer, a firewall drops it.")
+
+    def _key(self, _controller, keyval, _keycode, _state):
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+        elif keyval == Gdk.KEY_F5:
+            self.check()
+        else:
+            return False
+        return True
+
+
 class WebWindow(Gtk.Window):
     """A page of asustor.com inside the app: back, forward and reload
     buttons, the address under the title, a button that hands the page to
@@ -1476,7 +1686,7 @@ class WebWindow(Gtk.Window):
         header.set_title_widget(titles)
 
         self.progress = Gtk.ProgressBar()
-        self.progress.add_css_class("kiwi")
+        self.progress.add_css_class("accent")
         self.error = Gtk.Label(xalign=0, wrap=True, visible=False)
         self.error.add_css_class("statusbar")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -1557,6 +1767,7 @@ class AccApp(AppBase):
         self.set_accels_for_action("win.open", ["<Control>o"])
         self.set_accels_for_action("win.shares", ["<Control><Shift>o"])
         self.set_accels_for_action("win.ping", ["<Control>p"])
+        self.set_accels_for_action("win.ports", ["<Control><Shift>p"])
 
     def do_activate(self):
         win = self.get_active_window() or AccWindow(self)

@@ -254,6 +254,8 @@ Commands:
   open <name|ip|mac>     open the NAS web UI (ADM) in the browser
   url <name|ip|mac>      print the NAS web UI URL
   shares <name|ip|mac>   open the shared folders (smb://<ip>/) in the file manager
+  ports <name|ip|mac>    which services of the NAS answer (ADM, SMB, SSH, NFS, ...):
+                         a TCP connect to each well-known port, nothing more
   wol <name|ip|mac>      send a Wake-on-LAN magic packet; works for a
                          sleeping NAS that acc has seen before
   forget <name|ip|mac>   drop a NAS from acc's device memory (--all: every one)
@@ -261,7 +263,7 @@ Commands:
   version                print the acc version
 
 Options:
-  --json                 machine-readable output (scan)
+  --json                 machine-readable output (scan, ports)
   --all                  also list remembered devices that did not answer (scan)
   --watch                rescan continuously and redraw the table (scan)
   --interval <seconds>   rescan interval for --watch (default 30)
@@ -405,6 +407,54 @@ func main() {
 		if err := openURL(url, what); err != nil {
 			fail(err)
 		}
+	case "ports":
+		if len(args) != 1 {
+			usage()
+		}
+		host, name := args[0], args[0]
+		if net.ParseIP(host) == nil {
+			// A name or MAC: the device memory knows the address without
+			// a scan; a NAS never seen before needs one.
+			var found bool
+			for _, n := range loadMemory() {
+				if n.matches(host) && n.IP != "" {
+					host, name, found = n.IP, n.Name, true
+					break
+				}
+			}
+			if !found {
+				nas, err := findNas(host, timeout)
+				if err != nil {
+					fail(err)
+				}
+				if nas.IP == "" {
+					fail(fmt.Errorf("%s has no IPv4 address", nas.Name))
+				}
+				host, name = nas.IP, nas.Name
+			}
+		}
+		results := checkPorts(host, knownPorts, portTimeout)
+		if asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(results); err != nil {
+				fail(err)
+			}
+			return
+		}
+		fmt.Printf("%s (%s):\n", name, host)
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "PORT\tSERVICE\tSTATE")
+		open := 0
+		for _, r := range results {
+			if r.State == "open" {
+				open++
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\n", r.Port, r.Service, r.State)
+		}
+		w.Flush()
+		fmt.Printf("%d of %d services answer. closed: nothing listens; filtered: no answer (firewall).\n",
+			open, len(results))
 	case "wol":
 		if len(args) != 1 {
 			usage()

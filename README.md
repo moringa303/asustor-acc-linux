@@ -41,6 +41,7 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   acc shares <name|ip|mac>  # open the shared folders (smb://) in your file manager
   acc url    <name|ip|mac>  # print the ADM URL
   acc wol    <name|ip|mac>  # send a Wake-on-LAN magic packet
+  acc ports  <name|ip|mac>  # which services answer (ADM, SMB, SSH, NFS, ...)
   acc doctor                # diagnose "no device found" problems
   ```
 
@@ -53,14 +54,32 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   [Links to asustor.com](#links-to-asustorcom)), a right-click menu (open shared folders,
   copy the IP or MAC, forget a device), sortable columns, a search bar
   (Ctrl+F, or just start typing: name, IP, model, serial, MAC and state
-  are matched), and automatic refresh every 30 seconds. The table is the
-  layout from 1000 px of window width up (cells shorten with an ellipsis
-  and show the full text as a tooltip, never a horizontal scrollbar; the
-  Model and State columns are always shown whole); narrower windows get a
-  card list. Offline devices stay in the list, dimmed, so you can wake
-  them. A NAS whose answer to one scan got lost (it happens on a segment
-  with hundreds of devices) keeps its place as online until it has been
-  missing for 2½ minutes, so the list does not flicker.
+  are matched), and an optional automatic refresh every 30 seconds (off
+  by default; the menu switch is remembered). The table is the layout
+  from 1000 px of window width up (cells shorten with an ellipsis and
+  show the full text as a tooltip, never a horizontal scrollbar; the
+  Model, ADM and State columns are always shown whole); narrower windows
+  get a card list. Offline devices stay in the list, dimmed, so you can
+  wake them. A NAS whose answer to one scan got lost (it happens on a
+  segment with hundreds of devices) keeps its place as online until it
+  has been missing for 2½ minutes, so the list does not flicker.
+
+- Accent colour: Kiwi green by default, or Cyan, Amber, Coral or Violet
+  from the menu (the stripe under the header bar, the Open ADM button,
+  the Ready dots and the LEDs of the model glyphs follow). The window
+  itself follows your system's light or dark theme. Choices are kept in
+  `~/.config/asustor-acc/gui.json`.
+
+- Services check: "Check services (ports)…" (Ctrl+Shift+P, also in the
+  right-click menu) and `acc ports <name>` show which of the services a
+  NAS commonly runs answer from your computer: ADM (8000/8001), SMB,
+  SSH, FTP, AFP, NFS, rsync, iSCSI, WebDAV, MariaDB, Plex and the web
+  server ports. It is one TCP connection attempt per well-known port of
+  the one NAS you picked, nothing is sent, and the answer is open (a
+  service accepted), closed (nothing listens) or filtered (no answer: a
+  firewall drops it). Inspecting the NAS's traffic itself is not possible
+  from another computer on a switched network; that needs a capture on
+  the NAS or a mirror port on the switch.
 
 - Uptime: read from the NAS via SNMP, shown in the CLI's UPTIME column
   and as the tooltip of the GUI's State cell (see [Uptime](#uptime)).
@@ -125,13 +144,14 @@ acc <command> [options] [argument]
 | `shares <name\|ip\|mac>` | Open the NAS's shared folders (`smb://<ip>/`) in the file manager |
 | `url <name\|ip\|mac>` | Print the ADM URL |
 | `wol <name\|ip\|mac>` | Send a Wake-on-LAN magic packet; works for a sleeping NAS that `acc` has seen before |
+| `ports <name\|ip\|mac>` | Which services of the NAS answer: one TCP connection attempt per well-known port |
 | `forget <name\|ip\|mac>` | Drop a NAS from the device memory (`--all`: every one) |
 | `doctor` | Diagnose why discovery finds nothing |
 | `version` | Print the version |
 
 | Option | Meaning |
 |---|---|
-| `--json` | Machine-readable output for `scan` |
+| `--json` | Machine-readable output for `scan` and `ports` |
 | `--all` | Also list remembered devices that did not answer |
 | `--watch` | Rescan continuously and redraw the table |
 | `--interval <seconds>` | Rescan interval for `--watch` (default 30) |
@@ -150,6 +170,7 @@ acc open mynas              # device name as shown by `acc scan`
 acc shares mynas            # smb://<ip>/ in your file manager
 acc wol mynas               # no scan needed: the MAC comes from the device memory
 acc wol 00:11:32:aa:bb:cc
+acc ports mynas             # which services answer (ADM, SMB, SSH, NFS, ...)
 acc-gui                     # GUI; also available from the app menu
 ```
 
