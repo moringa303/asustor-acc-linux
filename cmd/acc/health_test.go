@@ -164,6 +164,55 @@ func TestSNMPHealthOldLayout(t *testing.T) {
 	}
 }
 
+// --mib forces a layout: the old agent read as old, the new one as new,
+// and a wrong forced layout still gives a report rather than an error.
+func TestSNMPHealthForcedLayout(t *testing.T) {
+	defer func() { mibLayout = "auto" }()
+	newAgent := []snmpVarbind{
+		strVB(oidASModel, "AS6704T"), strVB(oidNewProcessor, "Intel Celeron N5105"),
+		intVB(cell(oidNewTemps, 2, 1), 52), intVB(cell(oidNewTemps, 3, 1), 41),
+		strVB(cell(oidASDisks, 2, 1), "Disk 1"), strVB(cell(oidASDisks, 6, 1), "Normal"),
+		intVB(cell(oidASDisks, 7, 1), 36), intVB(cell(oidASDisks, 8, 1), 8000),
+	}
+	oldAgent := []snmpVarbind{
+		strVB(oidASModel, "AS3102T"), intVB(oidOldSysTemp, 39), intVB(oidOldCPUTemp, 47),
+		strVB(oidOldProcessor, "Intel Celeron N3050"),
+		strVB(cell(oidASDisks, 2, 1), "Disk 1"), intVB(cell(oidASDisks, 6, 1), 34),
+		intVB(cell(oidASDisks, 7, 1), 4000), strVB(cell(oidASDisks, 8, 1), "Good"),
+	}
+	for _, tc := range []struct {
+		name, force string
+		agent       []snmpVarbind
+		wantLayout  string
+		wantCPUTemp int64
+		wantSmart   string
+	}{
+		{"new forced new", "new", newAgent, "new", 52, "Normal"},
+		{"old forced old", "old", oldAgent, "old", 47, "Good"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mibLayout = tc.force
+			addr, _ := fakeAgent(t, tableAgent(tc.agent))
+			r, err := snmpHealth(addr, "public", healthTimeout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Layout != tc.wantLayout || r.CPUTempC == nil || *r.CPUTempC != tc.wantCPUTemp ||
+				len(r.Disks) != 1 || r.Disks[0].Smart != tc.wantSmart {
+				t.Errorf("forced %s: %+v disks %+v", tc.force, r, r.Disks)
+			}
+		})
+	}
+	t.Run("old agent forced new still answers", func(t *testing.T) {
+		mibLayout = "new"
+		addr, _ := fakeAgent(t, tableAgent(oldAgent))
+		r, err := snmpHealth(addr, "public", healthTimeout)
+		if err != nil || r.Layout != "new" || r.Model != "AS3102T" {
+			t.Errorf("got %+v, %v", r, err)
+		}
+	})
+}
+
 func TestSNMPHealthPlainAgent(t *testing.T) {
 	// An agent without the ASUSTOR MIB (net-snmp on a PC, say).
 	addr, _ := fakeAgent(t, tableAgent([]snmpVarbind{{oid: oidSysUpTime, tag: tagTimeTicks, value: []byte{0x01, 0x00}}}))

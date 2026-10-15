@@ -121,6 +121,10 @@ type healthReport struct {
 
 var errNoAsustorMIB = errors.New("the NAS answers SNMP but not the ASUSTOR MIB")
 
+// mibLayout is --mib: "auto" (told apart by the value at .2.2.0), "old"
+// or "new" to force one of the two layouts.
+var mibLayout = "auto"
+
 // snmpHealth asks the agent at addr (host:port) for everything above.
 func snmpHealth(addr, community string, timeout time.Duration) (*healthReport, error) {
 	conn, err := net.DialTimeout("udp", addr, timeout)
@@ -213,9 +217,19 @@ func snmpHealth(addr, community string, timeout time.Duration) (*healthReport, e
 		return out
 	}
 
-	if vb, ok := get(oidNewProcessor); ok && vb.tag == tagOctetString {
+	newLayout := false
+	switch mibLayout {
+	case "new":
+		newLayout = true
+	case "old":
+		newLayout = false
+	default:
+		vb, ok := get(oidNewProcessor)
+		newLayout = ok && vb.tag == tagOctetString
+	}
+	if newLayout {
 		r.Layout = "new"
-		r.Processor = vb.text()
+		r.Processor = text(oidNewProcessor)
 		r.CPUUsage = numbers(oidNewCPUUsage)
 		r.FanRPM = numbers(oidNewFanSpeed)
 		for _, row := range tableRows(walk(oidNewTemps), oidNewTemps) {
@@ -243,10 +257,13 @@ func snmpHealth(addr, community string, timeout time.Duration) (*healthReport, e
 	diskRows := tableRows(walk(oidASDisks), oidASDisks)
 	// column 6 holds the SMART verdict (a string) in the new layout and
 	// the temperature (an integer) in the old one
-	newDisks := false
-	for _, row := range diskRows {
-		if vb, ok := row.cells[6]; ok && vb.tag == tagOctetString {
-			newDisks = true
+	newDisks := newLayout
+	if mibLayout == "auto" {
+		for _, row := range diskRows {
+			if vb, ok := row.cells[6]; ok {
+				newDisks = vb.tag == tagOctetString
+				break
+			}
 		}
 	}
 	for _, row := range diskRows {

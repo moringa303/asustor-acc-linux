@@ -1,0 +1,419 @@
+ASUSTOR-SYSTEM-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+	OBJECT-GROUP, MODULE-COMPLIANCE
+				FROM SNMPv2-CONF
+    PhysAddress
+				FROM SNMPv2-TC				
+	enterprises, MODULE-IDENTITY, OBJECT-TYPE, Integer32
+				FROM SNMPv2-SMI;
+
+asustor	OBJECT IDENTIFIER 
+	::= { enterprises 44738 }
+
+asustorSystem MODULE-IDENTITY
+    ORGANIZATION "www.asustor.com"
+    CONTACT-INFO
+         "postal: ASUSTOR Inc.
+		 email: support@asustor.com"
+    DESCRIPTION
+        "Characteristics of the system information"
+    ::= { asustor 1 }		
+
+sysSerialNumber OBJECT-TYPE
+    SYNTAX	  OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  current
+    DESCRIPTION
+    "The serial number of this NAS"
+    ::= { asustorSystem 1 }
+
+sysADMVersion OBJECT-TYPE
+    SYNTAX		OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "The ADM version of this nas"
+    ::= { asustorSystem 2 }
+
+sysBiosVersion OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "The bios version of this nas"
+    ::= { asustorSystem 3 }
+	
+sysUptime OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "Asustor system uptime"
+    ::= { asustorSystem 4 }
+
+sysSystemTime OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS		current
+    DESCRIPTION
+    "Asustor system time"
+    ::= { asustorSystem 5 }
+
+sysTimeZone OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "Asustor system time zone area"
+    ::= { asustorSystem 6 }
+
+sysUpgradeAvailable OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "This oid is for checking whether there is a latest ADM can be upgraded.
+	 Available: There is a new version ready for download.
+	 Unavailable: This ADM is latest version."
+    ::= { asustorSystem 7 }
+	
+sysAsustorID OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "Asustor id"
+    ::= { asustorSystem 8 }		
+
+asustorHardware MODULE-IDENTITY
+    ORGANIZATION "www.asustor.com"
+    CONTACT-INFO
+         "postal:   Ccyuan Chen
+          email:    ccyuanchen@asustor.com"
+    DESCRIPTION
+        "Characteristics of the hardware information"
+    ::= { asustor 2 }
+
+modelName OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "Asustor model name"
+    ::= { asustorHardware 1 }
+	
+processorName OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "The system CPU model"
+    ::= { asustorHardware 2 }	
+
+SeqStructCpu ::= SEQUENCE {
+    cpuIndex	Integer32,
+	cpuUsage	Integer32
+}
+
+cpuTable OBJECT-TYPE
+    SYNTAX	   	SEQUENCE OF SeqStructCpu
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "Asustor cpu usage table"
+    ::= { asustorHardware 3 }
+
+cpuEntry OBJECT-TYPE
+    SYNTAX	   	SeqStructCpu
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "For all cpu entry"
+    INDEX   { cpuIndex }
+    ::= { cpuTable 1 }
+
+cpuIndex OBJECT-TYPE
+    SYNTAX	   	Integer32
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "The index of cpu usage table"
+    ::= { cpuEntry 1 }
+
+cpuUsage OBJECT-TYPE
+    SYNTAX	   	Integer32
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The cpu usage percentage"
+    ::= { cpuEntry 2 }	
+
+SeqStructFan ::= SEQUENCE {
+   fanIndex	Integer32,
+   fanSpeed	Integer32
+}
+
+fanTable OBJECT-TYPE
+    SYNTAX		SEQUENCE OF SeqStructFan
+    MAX-ACCESS	not-accessible
+    STATUS		current
+    DESCRIPTION
+    "Asustor fan speed table"
+    ::= { asustorHardware 4 }
+
+fanEntry OBJECT-TYPE
+    SYNTAX	   	SeqStructFan
+    MAX-ACCESS	not-accessible
+    STATUS		current
+    DESCRIPTION
+    "For all fan entry"
+    INDEX   { fanIndex }
+    ::= { fanTable 1 }
+
+fanIndex OBJECT-TYPE
+    SYNTAX	   	Integer32
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "The index of fan speed table"
+    ::= { fanEntry 1 }		
+
+fanSpeed OBJECT-TYPE
+    SYNTAX	   	Integer32
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The fan speed rpm"
+    ::= { fanEntry 2 }
+
+SeqStructTemperature ::= SEQUENCE {
+    temperatureIndex        Integer32,
+    temperatureCpu          Integer32,
+    temperatureSys          Integer32
+}
+
+temperatureTable OBJECT-TYPE
+    SYNTAX          SEQUENCE OF SeqStructTemperature
+    MAX-ACCESS      not-accessible
+    STATUS          current
+    DESCRIPTION
+        "System temperature sensor table"
+    ::= { asustorHardware 5 }
+
+temperatureEntry OBJECT-TYPE
+    SYNTAX          SeqStructTemperature
+    MAX-ACCESS      not-accessible
+    STATUS          current
+    DESCRIPTION
+        "Temperature sensor entry"
+    INDEX   { temperatureIndex }
+    ::= { temperatureTable 1 }
+
+temperatureIndex OBJECT-TYPE
+    SYNTAX          Integer32
+    MAX-ACCESS      not-accessible
+    STATUS          current
+    DESCRIPTION
+        "Temperature sensor index"
+    ::= { temperatureEntry 1 }
+
+temperatureCpu OBJECT-TYPE
+    SYNTAX          Integer32
+    MAX-ACCESS      read-only
+    STATUS          current
+    DESCRIPTION
+        "Cpu temperature in degrees Celsius"
+    ::= { temperatureEntry 2 }
+
+temperatureSys OBJECT-TYPE
+    SYNTAX          Integer32
+    MAX-ACCESS      read-only
+    STATUS          current
+    DESCRIPTION
+        "System temperature in degrees Celsius"
+    ::= { temperatureEntry 3 }
+
+SeqStructMemory ::= SEQUENCE {
+    memoryIndex           Integer32,
+    memoryTotal           Integer32,
+    memoryFree            Integer32,
+    memoryFreePercentage  Integer32
+}
+
+memoryTable OBJECT-TYPE
+    SYNTAX          SEQUENCE OF SeqStructMemory
+    MAX-ACCESS      not-accessible
+    STATUS          current
+    DESCRIPTION
+        "System memory information table"
+    ::= { asustorHardware 6 }
+
+memoryEntry OBJECT-TYPE
+    SYNTAX          SeqStructMemory
+    MAX-ACCESS      not-accessible
+    STATUS          current
+    DESCRIPTION
+        "An entry in the memory information table"
+    INDEX   { memoryIndex }
+    ::= { memoryTable 1 }
+
+memoryIndex OBJECT-TYPE
+    SYNTAX          Integer32
+    MAX-ACCESS      not-accessible
+    STATUS          current
+    DESCRIPTION
+        "Memory table index"
+    ::= { memoryEntry 1 }
+
+memoryTotal OBJECT-TYPE
+    SYNTAX          Integer32
+    MAX-ACCESS      read-only
+    STATUS          current
+    DESCRIPTION
+        "The system total memory"
+    ::= { memoryEntry 2 }
+
+memoryFree OBJECT-TYPE
+    SYNTAX          Integer32
+    MAX-ACCESS      read-only
+    STATUS          current
+    DESCRIPTION
+        "The system available free memory"
+    ::= { memoryEntry 3 }
+
+memoryFreePercentage OBJECT-TYPE
+    SYNTAX          Integer32
+    MAX-ACCESS      read-only
+    STATUS          current
+    DESCRIPTION
+        "The percentage of free memory"
+    ::= { memoryEntry 4 }
+
+asustorNetwork MODULE-IDENTITY
+    ORGANIZATION "www.asustor.com"
+    CONTACT-INFO
+         "postal:   Ccyuan Chen
+          email:    ccyuanchen@asustor.com"
+    DESCRIPTION
+        "Characteristics of the net information"
+    ::= { asustor 3 }
+
+SeqStructNet ::= SEQUENCE {
+	netIndex				Integer32,
+	netInterface			OCTET STRING,
+	netMacAddress			PhysAddress,
+	netIPv4Address			PhysAddress,
+	netIPv6Address			PhysAddress,
+	netPacketSent			Integer32,
+	netPacketReceived		Integer32
+}
+
+netTable OBJECT-TYPE
+    SYNTAX	   	SEQUENCE OF SeqStructNet
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "Asustor network table"
+    ::= { asustorNetwork 1 }
+
+netEntry OBJECT-TYPE
+    SYNTAX		SeqStructNet
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "For all net entry"
+    INDEX   { netIndex }
+    ::= {netTable 1 }
+
+netIndex OBJECT-TYPE
+    SYNTAX	   	Integer32(0..2147483647)
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "The index of network table"
+    ::= { netEntry 1 }		
+	
+netInterface OBJECT-TYPE
+    SYNTAX	   	OCTET STRING
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The network interface"
+    ::= { netEntry 2 }		
+	
+netMacAddress OBJECT-TYPE
+    SYNTAX	   	PhysAddress
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The network mac address"
+    ::= { netEntry 3 }		
+
+netIPv4Address OBJECT-TYPE
+    SYNTAX	   	PhysAddress
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The ipv4 network address"
+    ::= { netEntry 4 }		
+
+netIPv6Address OBJECT-TYPE
+    SYNTAX	   	PhysAddress
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The ipv6 network address"
+    ::= { netEntry 5 }		
+
+netPacketSent OBJECT-TYPE
+    SYNTAX		Integer32
+    MAX-ACCESS	read-only	
+    STATUS	   	current
+    DESCRIPTION
+    "The packets are sent in kilobyte(KB)"
+    ::= { netEntry 6 }			
+	
+netPacketReceived OBJECT-TYPE
+    SYNTAX		Integer32
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The packets are received in kilobyte(KB)"
+    ::= { netEntry 7 }	
+
+systemConformances 	OBJECT IDENTIFIER ::= { asustorSystem 9 }
+systemCompliances 	OBJECT IDENTIFIER ::= { systemConformances 1 }
+systemGroups		OBJECT IDENTIFIER ::= { systemConformances 2 }
+
+systemCompliance MODULE-COMPLIANCE
+    STATUS	current
+    DESCRIPTION
+		"The compliance force implement the ASUSTOR SYSTEM MIB."
+    MODULE
+        MANDATORY-GROUPS { systemGroup }
+    ::= { systemCompliances 1 }
+
+systemGroup OBJECT-GROUP
+    OBJECTS { sysSerialNumber,
+              sysADMVersion,
+              sysBiosVersion,
+              sysUptime,
+              sysSystemTime,
+              sysTimeZone,
+              sysUpgradeAvailable,
+              sysAsustorID,
+              modelName,
+              processorName,
+              temperatureCpu,
+              temperatureSys,
+              memoryTotal,
+              memoryFree,
+              memoryFreePercentage }
+    STATUS  current
+    DESCRIPTION
+            "A collection of objects providing basic information
+             of an asustor system entity."
+    ::= { systemGroups 1 }
+
+END

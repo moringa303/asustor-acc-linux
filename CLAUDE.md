@@ -25,6 +25,8 @@ a GTK4/PyGObject GUI (`gui/acc-gui.py`) that drives the CLI through
   shutdown can be overridden in `adm.json` next to it.
 - `assets/icon.svg`: icon source; the PNG sizes are rendered from it with
   `rsvg-convert`. `assets/screenshot.png` is the README screenshot.
+- `mibs/`: ASUSTOR's SNMP MIB files in both layouts (`older/`, `newer/`),
+  the reference for the object ids in `health.go`; see `mibs/README.md`.
 - `packaging/`: desktop file, AUR PKGBUILD, tarball install script.
   `.github/workflows/release.yml` builds deb/rpm/tarball on `v*` tags.
 

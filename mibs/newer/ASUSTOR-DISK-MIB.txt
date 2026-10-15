@@ -1,0 +1,233 @@
+ASUSTOR-DISK-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+	OBJECT-GROUP, MODULE-COMPLIANCE
+				FROM SNMPv2-CONF
+	enterprises, MODULE-IDENTITY, OBJECT-TYPE, Integer32
+				FROM SNMPv2-SMI;
+
+asustor	 OBJECT IDENTIFIER
+	::= { enterprises 44738 }
+
+asustorDisk MODULE-IDENTITY
+    ORGANIZATION "www.asustor.com"
+    CONTACT-INFO
+         "postal: ASUSTOR Inc.
+		 email: support@asustor.com"
+    DESCRIPTION
+        "Characteristics of the disk information"
+    ::= { asustor 4 }
+
+SeqStructDisk ::= SEQUENCE {
+    diskIndex		Integer32,
+    diskID			OCTET STRING,
+	diskModel		OCTET STRING,
+	diskType		OCTET STRING,
+	diskStatus		OCTET STRING,
+	diskSmartStatus	OCTET STRING,
+	diskTemperature	Integer32,
+	diskSize		Integer32
+}
+
+diskTable OBJECT-TYPE
+    SYNTAX	   	SEQUENCE OF SeqStructDisk
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "Asustor disk table"
+    ::= { asustorDisk 1 }
+
+diskEntry OBJECT-TYPE
+    SYNTAX	   	SeqStructDisk
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "For all disk entry"
+    INDEX   { diskIndex }
+    ::= { diskTable 1 }
+
+diskIndex OBJECT-TYPE
+    SYNTAX	   	Integer32
+    MAX-ACCESS	not-accessible
+    STATUS	   	current
+    DESCRIPTION
+    "The index of disk table"
+    ::= { diskEntry 1 }
+
+diskID OBJECT-TYPE
+    SYNTAX	  OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  current
+    DESCRIPTION
+    "The disk bay"
+    ::= { diskEntry 2 }
+
+diskModel OBJECT-TYPE
+    SYNTAX	  OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  current
+    DESCRIPTION
+    "The disk model name"
+    ::= { diskEntry 3 }
+
+diskType OBJECT-TYPE
+    SYNTAX	  OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  current
+    DESCRIPTION
+    "The disk type, including SATA, SSD."
+    ::= { diskEntry 4 }
+
+diskStatus OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS		current
+    DESCRIPTION
+    "Asustor disk status"
+    ::= { diskEntry 5 }
+	
+diskSmartStatus OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS		current
+    DESCRIPTION
+    "Asustor disk smart info"
+    ::= { diskEntry 6 }	
+
+diskTemperature OBJECT-TYPE
+    SYNTAX	   	Integer32
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The temperature of each disk uses Celsius degree"
+    ::= { diskEntry 7 }	
+
+diskSize OBJECT-TYPE
+    SYNTAX	   	Integer32
+    MAX-ACCESS	read-only
+    STATUS	   	current
+    DESCRIPTION
+    "The disk size of disk uses gigabyte(GB)"
+    ::= { diskEntry 8 }
+
+asustorVolume MODULE-IDENTITY
+    ORGANIZATION "www.asustor.com"
+    CONTACT-INFO
+         "postal:   Ccyuan Chen
+          email:    ccyuanchen@asustor.com"
+    DESCRIPTION
+        "Characteristics of the volume information"
+    ::= { asustor 5 }
+	
+SeqStructVolume ::= SEQUENCE {
+	volumeIndex			Integer32,
+    volumeName			OCTET STRING,
+	volumeLevel			OCTET STRING,
+	volumeStatus		OCTET STRING,
+	volumeFileSystem	OCTET STRING,
+	volumeTotalSize		Integer32,
+	volumeFreeSize  	Integer32
+}
+    
+volumeTable OBJECT-TYPE
+    SYNTAX		SEQUENCE OF SeqStructVolume
+    MAX-ACCESS	not-accessible
+    STATUS		current
+    DESCRIPTION
+    "The volume table"
+    ::= { asustorVolume 1 }
+
+volumeEntry	  OBJECT-TYPE
+    SYNTAX		SeqStructVolume
+    MAX-ACCESS	not-accessible
+    STATUS		current
+    DESCRIPTION
+    "For all volume entry"
+    INDEX   { volumeIndex }
+    ::= { volumeTable 1 }
+
+volumeIndex OBJECT-TYPE
+    SYNTAX	   Integer32(0..2147483647)
+    MAX-ACCESS	  not-accessible
+    STATUS	   current
+    DESCRIPTION
+    "The index of volume table"
+    ::= { volumeEntry 1 }
+
+volumeName OBJECT-TYPE
+    SYNTAX	  OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  current
+    DESCRIPTION
+    "The volume name"
+    ::= { volumeEntry 2 }	
+	
+volumeLevel OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "The volume level
+	 Each meanings of volume level represented describe below."
+    ::= { volumeEntry 3 }	
+	
+volumeStatus OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "The volume status
+	 Each meanings of volume level represented describe below."
+    ::= { volumeEntry 4 }
+
+volumeFileSystem OBJECT-TYPE
+    SYNTAX	  	OCTET STRING
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "The volume file system"
+    ::= { volumeEntry 5 }
+
+volumeTotalSize OBJECT-TYPE
+    SYNTAX	  	Integer32
+    MAX-ACCESS	read-only
+    STATUS	  	current
+    DESCRIPTION
+    "The size of volume uses gigabyte(GB)"
+    ::= { volumeEntry 6 }
+
+volumeFreeSize OBJECT-TYPE
+    SYNTAX	  	Integer32
+    MAX-ACCESS  read-only
+    STATUS	  	current
+    DESCRIPTION
+    "The remain size of volume uses gigabyte(GB)"
+    ::= { volumeEntry 7 }	
+
+diskConformances 	OBJECT IDENTIFIER ::= { asustorDisk 2 }
+diskCompliances 	OBJECT IDENTIFIER ::= { diskConformances 1 }
+diskGroups			OBJECT IDENTIFIER ::= { diskConformances 2 }
+
+diskCompliance MODULE-COMPLIANCE
+    STATUS  current
+    DESCRIPTION
+		"The compliance force implement the ASUSTOR DISK MIB."
+    MODULE
+        MANDATORY-GROUPS { diskGroup }
+    ::= { diskCompliances 1 }
+
+diskGroup OBJECT-GROUP
+	OBJECTS { diskID,
+			  diskModel,
+	          diskType,
+	          diskStatus,
+			  diskSmartStatus,
+	          diskTemperature,
+			  diskSize }
+    STATUS  current
+    DESCRIPTION
+            "A collection of objects providing basic information
+             of an asustor disk entity."
+    ::= { diskGroups 1 }
+
+END

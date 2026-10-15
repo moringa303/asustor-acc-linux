@@ -297,6 +297,8 @@ Options:
   --timeout <seconds>    how long to listen for answers (default 4)
   --iface <name>         restrict scanning and Wake-on-LAN to one interface
   --community <string>   SNMP read community (default "public", or $ACC_SNMP_COMMUNITY)
+  --mib <auto|old|new>   which layout of the ASUSTOR MIB the NAS speaks (health);
+                         auto tells the older and the ADM 4 layout apart itself
   --no-snmp              do not ask the devices for their uptime
   --verbose, -v          explain what is going on, on stderr
 
@@ -347,12 +349,19 @@ func main() {
 			snmpDisabled = true
 		case "--verbose", "-v":
 			verbose = true
-		case "--iface", "--timeout", "--interval", "--community", "--subnet":
+		case "--iface", "--timeout", "--interval", "--community", "--subnet", "--mib":
 			if i+1 >= len(args) {
 				usage()
 			}
 			consumed = 2
 			switch args[i] {
+			case "--mib":
+				switch args[i+1] {
+				case "auto", "old", "new":
+					mibLayout = args[i+1]
+				default:
+					fail(fmt.Errorf("--mib wants auto, old or new, not %q", args[i+1]))
+				}
 			case "--subnet":
 				if _, err := subnetHosts(args[i+1]); err != nil {
 					fail(err)

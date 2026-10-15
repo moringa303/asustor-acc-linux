@@ -98,7 +98,11 @@ WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
 SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "asustor-acc", "gui.json")
 DEFAULT_SETTINGS = {"auto_refresh": False, "show_offline": True, "accent": "Kiwi",
                     "notify": True, "subnets": "", "ssh_user": "admin", "adm_account": "admin",
-                    "devices": {}}
+                    "mib": "auto", "devices": {}}
+# The two layouts of the ASUSTOR MIB (see mibs/README.md); "auto" lets
+# acc tell them apart from the NAS's answers.
+MIB_LAYOUTS = [("auto", "Automatic"), ("old", "Older ADM (single values)"),
+               ("new", "ADM 4 and newer (tables)")]
 
 
 def load_settings():
@@ -2189,7 +2193,11 @@ class HealthWindow(ChildWindow):
             return
         self.checking = True
         self.spinner.start()
-        self.parent_window._run_acc(["health", self.dev.ip, "--json"], self._done)
+        args = ["health", self.dev.ip, "--json"]
+        mib = self.parent_window.settings.get("mib", "auto")
+        if mib in ("old", "new"):
+            args += ["--mib", mib]
+        self.parent_window._run_acc(args, self._done)
 
     def _done(self, out, err):
         self.checking = False
@@ -2397,6 +2405,14 @@ class PreferencesWindow(Gtk.Window):
         self._row(rows, "Also scan these subnets",
                   "Unicast queries to every host; reaches NAS behind a router. Up to a /22.",
                   self.subnets)
+
+        layouts = [key for key, _label in MIB_LAYOUTS]
+        mib = Gtk.DropDown.new_from_strings([label for _key, label in MIB_LAYOUTS])
+        mib.set_selected(layouts.index(settings.get("mib", "auto"))
+                         if settings.get("mib") in layouts else 0)
+        mib.connect("notify::selected", lambda d, _p: self._set("mib", layouts[d.get_selected()]))
+        self._row(rows, "SNMP MIB layout",
+                  "For Details: the older MIB or the ADM 4 one. Automatic tells them apart.", mib)
 
         ssh = Gtk.Entry(text=settings.get("ssh_user", "admin"), width_chars=18)
         ssh.connect("changed", lambda e: self._set("ssh_user", e.get_text().strip() or "admin"))

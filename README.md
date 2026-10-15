@@ -91,8 +91,11 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   and SMART verdict, every volume with its RAID level, file system,
   usage and state, and the UPS (status, charge, runtime, input voltage)
   when one is attached. Both layouts of the MIB that ADM has shipped
-  are understood (the older one with scalars, the ADM 4 one with
-  tables). The window refreshes every 15 seconds while open. It needs
+  are understood (the older one with single values, the ADM 4 one with
+  tables; both are in [`mibs/`](mibs/README.md)); the NAS's answers tell
+  them apart, and the "SNMP MIB layout" setting in Preferences, or
+  `acc health --mib old|new`, forces one when needed. The window
+  refreshes every 15 seconds while open. It needs
   SNMP enabled in ADM (Services › SNMP, v1/v2c), like the uptime. The
   latency to the NAS is not shown in the list; the Ping button and the
   Details window give it on request.
@@ -215,6 +218,7 @@ acc <command> [options] [argument]
 |---|---|
 | `--json` | Machine-readable output for `scan`, `ports` and `health` |
 | `--subnet <cidr>` | Also ask every host of this subnet directly (unicast mDNS, reaches NAS behind routers; repeatable, up to a /22) |
+| `--mib <auto\|old\|new>` | Which layout of the ASUSTOR MIB `health` reads; `auto` tells the older and the ADM 4 layout apart |
 | `--all` | Also list remembered devices that did not answer |
 | `--watch` | Rescan continuously and redraw the table |
 | `--interval <seconds>` | Rescan interval for `--watch` (default 30) |
