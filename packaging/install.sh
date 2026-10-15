@@ -7,11 +7,11 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 if command -v pacman >/dev/null; then
-    sudo pacman -S --needed --noconfirm gtk4 python-gobject xdg-utils webkitgtk-6.0
+    sudo pacman -S --needed --noconfirm gtk4 python-gobject xdg-utils webkitgtk-6.0 libsecret
 elif command -v apt-get >/dev/null; then
-    sudo apt-get install -y python3-gi gir1.2-gtk-4.0 xdg-utils gir1.2-webkit-6.0
+    sudo apt-get install -y python3-gi gir1.2-gtk-4.0 xdg-utils gir1.2-webkit-6.0 gir1.2-secret-1
 elif command -v dnf >/dev/null; then
-    sudo dnf install -y python3-gobject gtk4 xdg-utils webkitgtk6.0
+    sudo dnf install -y python3-gobject gtk4 xdg-utils webkitgtk6.0 libsecret
 else
     echo "Unknown distro: install GTK4 + PyGObject + xdg-utils (+ WebKitGTK 6.0 bindings) manually." >&2
 fi

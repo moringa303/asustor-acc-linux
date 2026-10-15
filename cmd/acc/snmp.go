@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -139,7 +140,11 @@ const (
 	tagNoSuchInstance = 0x81
 	tagEndOfMibView   = 0x82
 	tagGetRequest     = 0xA0
+	tagGetNextRequest = 0xA1
 	tagGetResponse    = 0xA2
+	tagCounter32      = 0x41
+	tagGauge32        = 0x42
+	tagCounter64      = 0x46
 )
 
 const (
@@ -215,8 +220,55 @@ func uptimeTicks(conn net.Conn, version int64, community string, timeout time.Du
 // Datagrams that do not parse or answer another request (a late reply to
 // an earlier attempt) are skipped until the deadline.
 func snmpGet(conn net.Conn, version int64, community string, oids [][]uint32, timeout time.Duration) (*snmpResponse, error) {
+	return snmpRequest(conn, version, community, tagGetRequest, oids, timeout)
+}
+
+// snmpWalk returns every object under root, by repeated GetNextRequest
+// (one object per round trip; the tables of a NAS are a few dozen).
+func snmpWalk(conn net.Conn, version int64, community string, root []uint32, timeout time.Duration) ([]snmpVarbind, error) {
+	var out []snmpVarbind
+	cur := root
+	for len(out) < 4096 {
+		resp, err := snmpRequest(conn, version, community, tagGetNextRequest, [][]uint32{cur}, timeout)
+		if err != nil {
+			return out, err
+		}
+		// v1 says noSuchName at the end of the MIB; v2c says endOfMibView.
+		if resp.errorStatus != 0 || len(resp.varbinds) == 0 {
+			return out, nil
+		}
+		vb := resp.varbinds[0]
+		if vb.tag == tagEndOfMibView || !oidHasPrefix(vb.oid, root) || oidCompare(vb.oid, cur) <= 0 {
+			return out, nil
+		}
+		out = append(out, vb)
+		cur = vb.oid
+	}
+	return out, nil
+}
+
+func oidHasPrefix(oid, prefix []uint32) bool {
+	return len(oid) >= len(prefix) && oidEqual(oid[:len(prefix)], prefix)
+}
+
+// oidCompare orders object identifiers the way GetNext walks them.
+func oidCompare(a, b []uint32) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			if a[i] < b[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return len(a) - len(b)
+}
+
+// snmpRequest sends one request PDU (GetRequest or GetNextRequest) and
+// waits for the matching response.
+func snmpRequest(conn net.Conn, version int64, community string, pduTag byte, oids [][]uint32, timeout time.Duration) (*snmpResponse, error) {
 	id := rand.Int32N(math.MaxInt32) + 1
-	if _, err := conn.Write(encodeGetRequest(version, community, id, oids)); err != nil {
+	if _, err := conn.Write(encodeRequest(version, community, id, pduTag, oids)); err != nil {
 		return nil, err
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
@@ -253,10 +305,42 @@ type snmpVarbind struct {
 type snmpResponse struct {
 	version     int64
 	community   string
+	pduTag      byte // what kind of PDU it was (requests, for the tests' agent)
 	requestID   int32
 	errorStatus int64
 	errorIndex  int64
 	varbinds    []snmpVarbind
+}
+
+// number reads an INTEGER, Counter32, Gauge32, TimeTicks or Counter64
+// value; ok is false for any other kind of value.
+func (vb snmpVarbind) number() (int64, bool) {
+	switch vb.tag {
+	case tagInteger:
+		v, err := decodeInt(vb.value)
+		return v, err == nil
+	case tagCounter32, tagGauge32, tagTimeTicks, tagCounter64:
+		if len(vb.value) == 0 || len(vb.value) > 9 || (len(vb.value) == 9 && vb.value[0] != 0) {
+			return 0, false
+		}
+		var v uint64
+		for _, c := range vb.value {
+			v = v<<8 | uint64(c)
+		}
+		if v > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(v), true
+	}
+	return 0, false
+}
+
+// text reads an OCTET STRING value (trimmed); "" for any other kind.
+func (vb snmpVarbind) text() string {
+	if vb.tag != tagOctetString {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimRight(string(vb.value), "\x00"))
 }
 
 // ticks returns the TimeTicks value bound to oid, if the response has one.
@@ -304,6 +388,11 @@ func oidEqual(a, b []uint32) bool {
 //	  [0xA0] { INTEGER request-id, INTEGER 0, INTEGER 0,
 //	    SEQUENCE OF SEQUENCE { OID, NULL } } }
 func encodeGetRequest(version int64, community string, requestID int32, oids [][]uint32) []byte {
+	return encodeRequest(version, community, requestID, tagGetRequest, oids)
+}
+
+// encodeRequest is encodeGetRequest for any request PDU tag.
+func encodeRequest(version int64, community string, requestID int32, pduTag byte, oids [][]uint32) []byte {
 	var varbinds []byte
 	for _, oid := range oids {
 		varbinds = append(varbinds, berTLV(tagSequence, append(berOID(oid), berTLV(tagNull, nil)...))...)
@@ -316,7 +405,7 @@ func encodeGetRequest(version int64, community string, requestID int32, oids [][
 	var msg []byte
 	msg = append(msg, berInt(tagInteger, version)...)
 	msg = append(msg, berTLV(tagOctetString, []byte(community))...)
-	msg = append(msg, berTLV(tagGetRequest, pdu)...)
+	msg = append(msg, berTLV(pduTag, pdu)...)
 	return berTLV(tagSequence, msg)
 }
 
@@ -476,10 +565,10 @@ func decodeResponse(pkt []byte) (*snmpResponse, error) {
 	return decodeMessage(pkt, tagGetResponse)
 }
 
-// decodeMessage parses a message whose PDU has the given tag. The
-// structure is fixed, so the parser is a straight sequence of reads with
-// no recursion; every length is checked against what is left of the
-// datagram.
+// decodeMessage parses a message whose PDU has the given tag (0 accepts
+// any request or response PDU). The structure is fixed, so the parser
+// is a straight sequence of reads with no recursion; every length is
+// checked against what is left of the datagram.
 func decodeMessage(pkt []byte, pduTag byte) (*snmpResponse, error) {
 	msg, rest, err := expectTLV(pkt, tagSequence)
 	if err != nil {
@@ -497,10 +586,17 @@ func decodeMessage(pkt []byte, pduTag byte) (*snmpResponse, error) {
 		return nil, err
 	}
 	r.community = string(community)
-	pdu, rest, err := expectTLV(msg, pduTag)
+	tag, pdu, rest, err := readTLV(msg)
 	if err != nil {
 		return nil, err
 	}
+	if pduTag != 0 && tag != pduTag {
+		return nil, errMalformed
+	}
+	if tag != tagGetRequest && tag != tagGetNextRequest && tag != tagGetResponse {
+		return nil, errMalformed
+	}
+	r.pduTag = tag
 	if len(rest) != 0 {
 		return nil, errMalformed
 	}

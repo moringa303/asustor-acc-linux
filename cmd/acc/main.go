@@ -13,6 +13,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -151,6 +152,28 @@ func watchScan(timeout, interval time.Duration, all, asJSON bool) {
 	}
 }
 
+// resolveHost turns a name, IP or MAC into the IPv4 address and name of a
+// NAS: an address as given, a remembered NAS without a scan, anything
+// else by scanning.
+func resolveHost(target string, timeout time.Duration, fail func(error)) (host, name string) {
+	if net.ParseIP(target) != nil {
+		return target, target
+	}
+	for _, n := range loadMemory() {
+		if n.matches(target) && n.IP != "" {
+			return n.IP, n.Name
+		}
+	}
+	nas, err := findNas(target, timeout)
+	if err != nil {
+		fail(err)
+	}
+	if nas.IP == "" {
+		fail(fmt.Errorf("%s has no IPv4 address", nas.Name))
+	}
+	return nas.IP, nas.Name
+}
+
 // launchWait is how long a launcher gets to exit with an error before it
 // counts as started (a file manager that is up keeps running).
 const launchWait = 3 * time.Second
@@ -256,6 +279,8 @@ Commands:
   shares <name|ip|mac>   open the shared folders (smb://<ip>/) in the file manager
   ports <name|ip|mac>    which services of the NAS answer (ADM, SMB, SSH, NFS, ...):
                          a TCP connect to each well-known port, nothing more
+  health <name|ip|mac>   temperatures, fans, CPU, memory, disks and volumes as
+                         the NAS reports them over SNMP (ASUSTOR MIB)
   wol <name|ip|mac>      send a Wake-on-LAN magic packet; works for a
                          sleeping NAS that acc has seen before
   forget <name|ip|mac>   drop a NAS from acc's device memory (--all: every one)
@@ -263,7 +288,9 @@ Commands:
   version                print the acc version
 
 Options:
-  --json                 machine-readable output (scan, ports)
+  --json                 machine-readable output (scan, ports, health)
+  --subnet <cidr>        also ask every host of this subnet directly (unicast
+                         mDNS reaches NAS behind routers; repeatable, max /22)
   --all                  also list remembered devices that did not answer (scan)
   --watch                rescan continuously and redraw the table (scan)
   --interval <seconds>   rescan interval for --watch (default 30)
@@ -320,12 +347,17 @@ func main() {
 			snmpDisabled = true
 		case "--verbose", "-v":
 			verbose = true
-		case "--iface", "--timeout", "--interval", "--community":
+		case "--iface", "--timeout", "--interval", "--community", "--subnet":
 			if i+1 >= len(args) {
 				usage()
 			}
 			consumed = 2
 			switch args[i] {
+			case "--subnet":
+				if _, err := subnetHosts(args[i+1]); err != nil {
+					fail(err)
+				}
+				extraSubnets = append(extraSubnets, args[i+1])
 			case "--iface":
 				ifaceName = args[i+1]
 				if _, err := net.InterfaceByName(ifaceName); err != nil {
@@ -407,32 +439,38 @@ func main() {
 		if err := openURL(url, what); err != nil {
 			fail(err)
 		}
+	case "health":
+		if len(args) != 1 {
+			usage()
+		}
+		host, name := resolveHost(args[0], timeout, fail)
+		if snmpDisabled {
+			fail(fmt.Errorf("health needs SNMP; drop --no-snmp"))
+		}
+		report, err := snmpHealth(net.JoinHostPort(host, snmpPort), snmpCommunity, snmpPatientTimeout)
+		if err != nil && !errors.Is(err, errNoAsustorMIB) {
+			fail(fmt.Errorf("%s (%s): no SNMP answer (%v); enable SNMP in ADM > Services > SNMP "+
+				"(v1/v2c, community %q)", name, host, err, snmpCommunity))
+		}
+		report.Name, report.IP = name, host
+		if asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(report); err != nil {
+				fail(err)
+			}
+			return
+		}
+		if err != nil {
+			fail(fmt.Errorf("%s (%s): %v; the uptime is all it reports", name, host, err))
+		}
+		fmt.Printf("%s (%s)\n", name, host)
+		printHealth(report)
 	case "ports":
 		if len(args) != 1 {
 			usage()
 		}
-		host, name := args[0], args[0]
-		if net.ParseIP(host) == nil {
-			// A name or MAC: the device memory knows the address without
-			// a scan; a NAS never seen before needs one.
-			var found bool
-			for _, n := range loadMemory() {
-				if n.matches(host) && n.IP != "" {
-					host, name, found = n.IP, n.Name, true
-					break
-				}
-			}
-			if !found {
-				nas, err := findNas(host, timeout)
-				if err != nil {
-					fail(err)
-				}
-				if nas.IP == "" {
-					fail(fmt.Errorf("%s has no IPv4 address", nas.Name))
-				}
-				host, name = nas.IP, nas.Name
-			}
-		}
+		host, name := resolveHost(args[0], timeout, fail)
 		results := checkPorts(host, knownPorts, portTimeout)
 		if asJSON {
 			enc := json.NewEncoder(os.Stdout)

@@ -373,7 +373,10 @@ func fakeAgent(t *testing.T, handler func(req *snmpResponse) [][]byte) (addr str
 			if err != nil {
 				return
 			}
-			req, err := decodeMessage(buf[:n], tagGetRequest)
+			req, err := decodeMessage(buf[:n], 0)
+			if err == nil && req.pduTag == tagGetResponse {
+				err = errMalformed
+			}
 			if err != nil {
 				t.Errorf("agent received a malformed request %X: %v", buf[:n], err)
 				continue

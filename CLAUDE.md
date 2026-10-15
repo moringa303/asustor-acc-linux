@@ -11,13 +11,18 @@ a GTK4/PyGObject GUI (`gui/acc-gui.py`) that drives the CLI through
   (device record, TXT parsing, URL), `scan.go` (built-in mDNS and
   avahi-browse run together and merged), `avahi.go`, `cache.go` (device
   memory in `$XDG_CACHE_HOME/asustor-acc/devices.json`, online time),
-  `snmp.go` (uptime), `ports.go` (`acc ports`: TCP connect to the
-  well-known service ports of one NAS), `wol.go`, `doctor.go`.
+  `snmp.go` (GET and GetNext client, uptime), `health.go` (`acc health`:
+  the ASUSTOR MIB), `ports.go` (`acc ports`: TCP connect to the
+  well-known service ports of one NAS), `subnet.go` (`--subnet`: unicast
+  mDNS sweep of a subnet), `wol.go`, `doctor.go`.
 - `cmd/fakenas/`: advertises a fake NAS so everything is testable without
   hardware (`-name`, `-model`, `-mac`, `-port`, `-init`).
-- `gui/acc-gui.py`: GTK4 GUI, one file, no build step. libadwaita and
-  WebKitGTK 6.0 are optional at runtime. Settings (auto refresh, offline
-  devices, accent colour) live in `~/.config/asustor-acc/gui.json`.
+- `gui/acc-gui.py`: GTK4 GUI, one file, no build step. libadwaita,
+  WebKitGTK 6.0 and libsecret are optional at runtime. Settings (auto
+  refresh, offline devices, accent, notifications, subnets, SSH user,
+  ADM account, tags and notes per NAS) live in
+  `~/.config/asustor-acc/gui.json`; the ADM API paths for restart and
+  shutdown can be overridden in `adm.json` next to it.
 - `assets/icon.svg`: icon source; the PNG sizes are rendered from it with
   `rsvg-convert`. `assets/screenshot.png` is the README screenshot.
 - `packaging/`: desktop file, AUR PKGBUILD, tarball install script.

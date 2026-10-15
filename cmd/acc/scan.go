@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,9 +60,42 @@ func scan(timeout time.Duration) ([]Nas, error) {
 	for _, n := range found {
 		probe.ask(n.IP, answeredSNMP[n.key()])
 	}
+	measureRTT(found)
 	probe.apply(found)
 	return remember(known, found, time.Now()), nil
 }
+
+// rttTimeout bounds the latency measurement.
+const rttTimeout = time.Second
+
+// measureRTT times a TCP connection to the ADM port of every device, all
+// at once; a device that does not accept one keeps no value.
+func measureRTT(list []Nas) {
+	var wg sync.WaitGroup
+	for i := range list {
+		if list[i].IP == "" || list[i].Port == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(n *Nas) {
+			defer wg.Done()
+			start := time.Now()
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort(n.IP, strconv.Itoa(n.Port)), rttTimeout)
+			if err != nil {
+				return
+			}
+			conn.Close()
+			ms := float64(time.Since(start).Microseconds()) / 1000
+			ms = float64(int(ms*10+0.5)) / 10
+			n.RTTms = &ms
+		}(&list[i])
+	}
+	wg.Wait()
+}
+
+// extraSubnets are swept with unicast queries next to the multicast
+// discovery (--subnet, repeatable).
+var extraSubnets []string
 
 // stillUp returns the remembered devices that answered the previous scan,
 // are absent from found and have just answered an SNMP query: such a NAS
@@ -111,8 +145,23 @@ func discover(timeout time.Duration) ([]Nas, error) {
 		list, err := builtinScan(timeout)
 		builtin <- result{list, err}
 	}()
+	swept := make(chan []Nas, 1)
+	go func() {
+		var list []Nas
+		for _, cidr := range extraSubnets {
+			found, err := subnetScan(cidr, timeout/2)
+			if err != nil {
+				vlog("subnet %s: %v", cidr, err)
+				continue
+			}
+			vlog("subnet %s: %d device(s)", cidr, len(found))
+			list = append(list, found...)
+		}
+		swept <- list
+	}()
 	avahiList, avahiRan := avahiScan(timeout)
 	b := <-builtin
+	sweptList := <-swept
 
 	if b.err != nil {
 		vlog("built-in mDNS scan failed: %v", b.err)
@@ -131,6 +180,9 @@ func discover(timeout time.Duration) ([]Nas, error) {
 		mergeNas(byKey, n)
 	}
 	for _, n := range avahiList {
+		mergeNas(byKey, n)
+	}
+	for _, n := range sweptList {
 		mergeNas(byKey, n)
 	}
 	return sortedByName(byKey), nil

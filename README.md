@@ -42,6 +42,8 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   acc url    <name|ip|mac>  # print the ADM URL
   acc wol    <name|ip|mac>  # send a Wake-on-LAN magic packet
   acc ports  <name|ip|mac>  # which services answer (ADM, SMB, SSH, NFS, ...)
+  acc health <name|ip|mac>  # temperatures, fans, CPU, memory, disks, volumes (SNMP)
+  acc scan --subnet 10.1.2.0/24   # also ask every host of another subnet directly
   acc doctor                # diagnose "no device found" problems
   ```
 
@@ -80,6 +82,61 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   firewall drops it). Inspecting the NAS's traffic itself is not possible
   from another computer on a switched network; that needs a capture on
   the NAS or a mirror port on the switch.
+
+- Details over SNMP: "Details (SNMP)…" (Ctrl+D) and `acc health <name>`
+  show what the NAS reports about itself: model, ADM and serial, uptime,
+  CPU load, memory, system and CPU temperature, fan speed, every disk
+  with its model, size, temperature, status and SMART verdict, and
+  every volume with its RAID level, file system and usage. The window
+  refreshes every 15 seconds while open. It needs SNMP enabled in ADM
+  (Services › SNMP, v1/v2c), like the uptime. The latency to the NAS is
+  not shown in the list; the Ping button and the Details window give it
+  on request.
+
+- Restart and shut down: in the right-click menu, after a confirmation.
+  The app signs in to ADM's web API with your ADM account (asked for
+  once, kept in the desktop keyring with libsecret when you tick
+  "remember", otherwise for the session only) and sends the power
+  request. "Open ADM in a window" shows ADM itself inside the app for
+  everything else, such as the network settings. ADM's power endpoints
+  are not documented by ASUSTOR; if your ADM version answers with an
+  error, `~/.config/asustor-acc/adm.json` can name the request your
+  ADM makes (the network tab of the browser shows it when you click
+  Power Off):
+
+  ```json
+  {"restart": "settings/power.cgi?act=restart", "shutdown": "settings/power.cgi?act=shutdown"}
+  ```
+
+- Notifications: a desktop notification when a NAS goes offline, comes
+  back or shows up for the first time, for changes found by the
+  automatic refresh or while the window is in the background. Off in
+  Preferences if you prefer.
+
+- Other subnets: multicast discovery stops at the router. Preferences
+  can list subnets (`10.1.2.0/24`, up to a /22 each) whose hosts are
+  asked directly with unicast mDNS queries, which ASUSTOR devices
+  answer; `acc scan --subnet 10.1.2.0/24` does the same.
+
+- Tags and notes: "Tags and note…" (F2) in the right-click menu. Tags
+  show as small pills after the name, in the table and the cards, the
+  note is the tooltip of the name, and the search bar matches both.
+  "Export device list…" (Ctrl+E) writes the list as shown to a CSV file
+  with the tags and notes.
+
+- ADM versions: a NAS running an older ADM than the newest one seen on
+  your network gets a dotted underline under its version; the tooltip
+  names the NAS with the newer one.
+
+- "Open SSH in a terminal" (Ctrl+T) runs `ssh <user>@<ip>` in your
+  terminal emulator (`$TERMINAL`, or the first of GNOME Terminal,
+  Console, Ptyxis, Konsole, Xfce Terminal, Tilix, Alacritty, kitty,
+  foot, WezTerm, xterm that is installed); the user is set in
+  Preferences. SSH has to be enabled in ADM › Services.
+
+- Preferences (Ctrl+,): accent colour, notifications, extra subnets, the
+  SSH user, the ADM account and forgetting the stored password. All
+  settings live in `~/.config/asustor-acc/gui.json`.
 
 - Uptime: read from the NAS via SNMP, shown in the CLI's UPTIME column
   and as the tooltip of the GUI's State cell (see [Uptime](#uptime)).
@@ -145,13 +202,15 @@ acc <command> [options] [argument]
 | `url <name\|ip\|mac>` | Print the ADM URL |
 | `wol <name\|ip\|mac>` | Send a Wake-on-LAN magic packet; works for a sleeping NAS that `acc` has seen before |
 | `ports <name\|ip\|mac>` | Which services of the NAS answer: one TCP connection attempt per well-known port |
+| `health <name\|ip\|mac>` | Temperatures, fans, CPU, memory, disks and volumes as the NAS reports them over SNMP |
 | `forget <name\|ip\|mac>` | Drop a NAS from the device memory (`--all`: every one) |
 | `doctor` | Diagnose why discovery finds nothing |
 | `version` | Print the version |
 
 | Option | Meaning |
 |---|---|
-| `--json` | Machine-readable output for `scan` and `ports` |
+| `--json` | Machine-readable output for `scan`, `ports` and `health` |
+| `--subnet <cidr>` | Also ask every host of this subnet directly (unicast mDNS, reaches NAS behind routers; repeatable, up to a /22) |
 | `--all` | Also list remembered devices that did not answer |
 | `--watch` | Rescan continuously and redraw the table |
 | `--interval <seconds>` | Rescan interval for `--watch` (default 30) |
@@ -171,6 +230,7 @@ acc shares mynas            # smb://<ip>/ in your file manager
 acc wol mynas               # no scan needed: the MAC comes from the device memory
 acc wol 00:11:32:aa:bb:cc
 acc ports mynas             # which services answer (ADM, SMB, SSH, NFS, ...)
+acc health mynas            # what the NAS reports over SNMP
 acc-gui                     # GUI; also available from the app menu
 ```
 

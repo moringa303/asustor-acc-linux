@@ -97,7 +97,7 @@ func remember(known, found []Nas, now time.Time) []Nas {
 			continue
 		}
 		p.Online = false
-		p.UptimeSeconds, p.UptimeSource = nil, ""
+		p.UptimeSeconds, p.UptimeSource, p.RTTms = nil, "", nil
 		p.URL, p.SharesURL = p.webURL(), p.sharesURL()
 		offline = append(offline, p)
 	}

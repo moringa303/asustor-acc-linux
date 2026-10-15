@@ -44,6 +44,10 @@ type Nas struct {
 	UptimeSeconds *int64 `json:"uptime_seconds,omitempty"`
 	UptimeSource  string `json:"uptime_source,omitempty"`
 	SNMP          bool   `json:"snmp,omitempty"`
+
+	// Round trip of a TCP connection to the ADM port, measured by the
+	// scan that found the NAS (milliseconds).
+	RTTms *float64 `json:"rtt_ms,omitempty"`
 }
 
 func (n *Nas) applyTxt(txt []string) {

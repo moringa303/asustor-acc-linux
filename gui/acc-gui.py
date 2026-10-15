@@ -5,14 +5,20 @@ Discovery, Wake-on-LAN and the device memory live in the bundled `acc`
 binary; this window presents its results like the Control Center device
 list and keeps them fresh.
 """
+import csv
+import ipaddress
 import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import weakref
 from datetime import datetime
 
@@ -41,6 +47,14 @@ except (ValueError, ImportError):
     WebKit = None
 WEBKIT_HINT = ("install the WebKitGTK bindings to open it inside the app: gir1.2-webkit-6.0 "
                "(Debian, Ubuntu), webkitgtk6.0 (Fedora), webkitgtk-6.0 (Arch)")
+
+# libsecret keeps the ADM password in the desktop's keyring; without it
+# the password is asked for once per session and never written anywhere.
+try:
+    gi.require_version("Secret", "1")
+    from gi.repository import Secret  # noqa: E402
+except (ValueError, ImportError):
+    Secret = None
 
 
 def _find_acc():
@@ -78,23 +92,179 @@ ACCENTS = {
 ACCENT = {"name": "Kiwi", "fill": ACCENTS["Kiwi"][0], "deep": ACCENTS["Kiwi"][1]}
 WEBSITE = "https://github.com/moringa303/asustor-acc-linux"
 
-# Remembered choices: automatic refresh, offline devices, the accent.
+# Remembered choices: automatic refresh, offline devices, the accent,
+# notifications, extra subnets, the SSH user, the ADM account, and the
+# tags and note of each NAS (by MAC).
 SETTINGS_FILE = os.path.join(GLib.get_user_config_dir(), "asustor-acc", "gui.json")
-DEFAULT_SETTINGS = {"auto_refresh": False, "show_offline": True, "accent": "Kiwi"}
+DEFAULT_SETTINGS = {"auto_refresh": False, "show_offline": True, "accent": "Kiwi",
+                    "notify": True, "subnets": "", "ssh_user": "admin", "adm_account": "admin",
+                    "devices": {}}
 
 
 def load_settings():
-    settings = dict(DEFAULT_SETTINGS)
+    settings = json.loads(json.dumps(DEFAULT_SETTINGS))
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            settings.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
+            settings.update({k: v for k, v in data.items()
+                             if k in DEFAULT_SETTINGS and isinstance(v, type(DEFAULT_SETTINGS[k]))})
     except (OSError, ValueError):
         pass
     if settings["accent"] not in ACCENTS:
         settings["accent"] = DEFAULT_SETTINGS["accent"]
     return settings
+
+
+def parse_subnets(text):
+    """'10.1.2.0/24, 10.1.3.0/24' -> the valid CIDRs and the rejected words."""
+    good, bad = [], []
+    for word in re.split(r"[\s,;]+", text.strip()):
+        if not word:
+            continue
+        try:
+            net = ipaddress.ip_network(word, strict=False)
+            if net.version != 4 or net.prefixlen < 22:
+                raise ValueError
+            good.append(str(net))
+        except ValueError:
+            bad.append(word)
+    return good, bad
+
+
+# -- ADM web API ------------------------------------------------------
+# Restart and shut down go through ADM's own web API: a sign-in that
+# returns a session id, then the power request with it. The paths are
+# those of ADM's portal; ~/.config/asustor-acc/adm.json can replace any
+# of them (the network tab of the browser shows what ADM calls when you
+# click Power Off): {"restart": "settings/power.cgi?act=restart"}.
+ADM_FILE = os.path.join(GLib.get_user_config_dir(), "asustor-acc", "adm.json")
+ADM_ENDPOINTS = {
+    "login": "login.cgi?act=login",
+    "restart": "settings/power.cgi?act=restart",
+    "shutdown": "settings/power.cgi?act=shutdown",
+}
+ADM_TIMEOUT = 15
+
+
+class AdmError(Exception):
+    pass
+
+
+def adm_endpoints():
+    endpoints = dict(ADM_ENDPOINTS)
+    try:
+        with open(ADM_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            endpoints.update({k: v for k, v in data.items() if k in endpoints and isinstance(v, str)})
+    except (OSError, ValueError):
+        pass
+    return endpoints
+
+
+def adm_call(base_url, path, form=None, sid=None):
+    """One request to ADM's API; the decoded JSON answer, or AdmError."""
+    url = base_url.rstrip("/") + "/portal/apis/" + path
+    if sid:
+        url += ("&" if "?" in url else "?") + "sid=" + urllib.parse.quote(sid)
+    data = urllib.parse.urlencode(form).encode() if form else None
+    req = urllib.request.Request(url, data=data, headers={
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "User-Agent": f"{APP_NAME} for Linux"})
+    # The NAS uses a self-signed certificate on its HTTPS port.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=ADM_TIMEOUT, context=ctx) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        raise AdmError(f"ADM answered {exc.code} for {path.split('?')[0]}") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        raise AdmError(f"cannot reach ADM: {getattr(exc, 'reason', exc)}") from exc
+    try:
+        answer = json.loads(body)
+    except ValueError:
+        raise AdmError(f"ADM did not answer {path.split('?')[0]} with JSON") from None
+    if not isinstance(answer, dict):
+        raise AdmError("unexpected answer from ADM")
+    if answer.get("success") is False:
+        msg = answer.get("error_msg") or f"error {answer.get('error_code', '?')}"
+        raise AdmError(f"ADM: {msg}")
+    return answer
+
+
+def adm_login(base_url, account, password):
+    answer = adm_call(base_url, adm_endpoints()["login"],
+                      {"account": account, "password": password})
+    sid = answer.get("sid")
+    if not sid:
+        raise AdmError("ADM accepted the sign-in but gave no session id")
+    return sid
+
+
+def adm_power(base_url, sid, action):
+    """action is 'restart' or 'shutdown'."""
+    return adm_call(base_url, adm_endpoints()[action], sid=sid)
+
+
+# -- the ADM password -------------------------------------------------
+SECRET_SCHEMA = Secret.Schema.new(APP_ID, Secret.SchemaFlags.NONE,
+                                  {"app": Secret.SchemaAttributeType.STRING}) if Secret else None
+
+
+def keyring_lookup():
+    if Secret is None:
+        return None
+    try:
+        return Secret.password_lookup_sync(SECRET_SCHEMA, {"app": APP_ID}, None)
+    except GLib.Error:
+        return None
+
+
+def keyring_store(account, password):
+    if Secret is None:
+        return False
+    try:
+        return Secret.password_store_sync(SECRET_SCHEMA, {"app": APP_ID}, Secret.COLLECTION_DEFAULT,
+                                          f"{APP_NAME}: ADM password of {account}", password, None)
+    except GLib.Error:
+        return False
+
+
+def keyring_clear():
+    if Secret is None:
+        return
+    try:
+        Secret.password_clear_sync(SECRET_SCHEMA, {"app": APP_ID}, None)
+    except GLib.Error:
+        pass
+
+
+# -- terminals for the SSH shortcut ------------------------------------
+TERMINALS = [
+    ("gnome-terminal", ["--"]), ("kgx", ["--"]), ("ptyxis", ["--"]), ("konsole", ["-e"]),
+    ("xfce4-terminal", ["-x"]), ("tilix", ["-e"]), ("alacritty", ["-e"]), ("kitty", []),
+    ("foot", []), ("wezterm", ["start", "--"]), ("x-terminal-emulator", ["-e"]), ("xterm", ["-e"]),
+]
+
+
+def terminal_command():
+    """The terminal emulator to run a command in: $TERMINAL, or the first
+    known one that is installed. None when there is none."""
+    term = os.environ.get("TERMINAL")
+    if term and shutil.which(term):
+        return [term, "-e"]
+    for name, flag in TERMINALS:
+        if shutil.which(name):
+            return [name, *flag]
+    return None
+
+
+def adm_version_key(version):
+    """'4.3.3.RC92' -> (4, 3, 3): what decides which ADM is newer."""
+    return tuple(int(p) for p in re.findall(r"\d+", version)[:4])
 
 
 def save_settings(settings):
@@ -234,6 +404,12 @@ listview.cards > row { padding: 8px 12px; }
 .tabular { font-variant-numeric: tabular-nums; }
 .empty-title { font-size: 1.4em; font-weight: bold; }
 .statusbar { padding: 6px 12px; }
+/* Tags after a name; an ADM version with a newer one on another NAS. */
+.tag { background: alpha(currentColor, 0.12); border-radius: 999px; padding: 0 7px;
+       font-size: 0.8em; }
+label.outdated { text-decoration-line: underline; }
+.health-value { font-variant-numeric: tabular-nums; }
+.section-title { font-weight: bold; margin-top: 12px; margin-bottom: 4px; }
 /* Short fades instead of hard switches: hover and selection of a row,
    a device dimming when it goes offline, a dot changing colour. */
 columnview > listview > row, listview.cards > row, list > row {
@@ -255,7 +431,11 @@ button.accent:hover { background-color: shade(FILL, 1.08); }
 button.accent:active, button.accent:checked { background-color: DEEP; }
 button.accent:disabled { background-color: alpha(FILL, 0.35); color: alpha(#101418, 0.5); }
 .accent-icon { color: DEEP; }
-.state-dot.ready, .port-dot.open { background: DEEP; }
+.state-dot.ready, .port-dot.open, .health-dot.ok { background: DEEP; }
+label.outdated { text-decoration-color: DEEP; }
+levelbar.accent block.filled { background-color: FILL; border-color: DEEP; }
+levelbar.accent block.high { background-color: #e5a50a; border-color: #c48a00; }
+levelbar.accent block.full { background-color: #e01b24; border-color: #a51d2d; }
 progressbar.accent trough { min-height: 3px; border: none; border-radius: 0; background: alpha(FILL, 0.25); }
 progressbar.accent progress { min-height: 3px; border: none; border-radius: 0; background: FILL; }
 """
@@ -289,6 +469,16 @@ def accent_stripe():
     stripe = Gtk.Box()
     stripe.add_css_class("accent-stripe")
     return stripe
+
+
+def fill_tags(box, dev):
+    """Rebuild the pills of a tag box from the device's tags."""
+    while (child := box.get_first_child()) is not None:
+        box.remove(child)
+    for tag in dev.tag_list():
+        pill = Gtk.Label(label=tag)
+        pill.add_css_class("tag")
+        box.append(pill)
 
 
 def _parse_time(value):
@@ -434,8 +624,16 @@ class Device(GObject.Object):
     # and "00:11:32:AA:BB:CC · AS2025TEST01".
     details = GObject.Property(type=str, default="")
     ids = GObject.Property(type=str, default="")
+    # Your own tags (comma-separated) and note, from the settings.
+    tags = GObject.Property(type=str, default="")
+    note = GObject.Property(type=str, default="")
+    # Tooltips of the IP cell (the latency) and the ADM cell (a newer ADM
+    # on another NAS), and whether the ADM is behind the newest seen.
+    ip_tip = GObject.Property(type=str, default="")
+    adm_tip = GObject.Property(type=str, default="")
+    outdated = GObject.Property(type=bool, default=False)
 
-    def __init__(self, data):
+    def __init__(self, data, meta=None):
         super().__init__()
         self.data = {}
         self.answered = False  # did the NAS answer the last scan
@@ -443,8 +641,26 @@ class Device(GObject.Object):
         self.uptime = None  # seconds the NAS reported, as of last_seen
         self.last_seen = None
         self.seen_tip = ""
+        self.rtt = ""  # "2.3 ms", the TCP round trip to ADM measured by the scan
         self.text = ""  # every field in one lower-case string, for the search
+        if meta:
+            self.tags = ",".join(meta.get("tags") or [])
+            self.note = meta.get("note") or ""
         self.update(data)
+
+    def tag_list(self):
+        return [t for t in self.tags.split(",") if t]
+
+    def set_meta(self, tags, note):
+        """Tags (a list) and note from the settings; refreshes the search text."""
+        self.tags, self.note = ",".join(tags), note
+        self._set_online(self.online)
+
+    def set_adm_state(self, outdated, tip):
+        if outdated != self.outdated:
+            self.outdated = outdated
+        if tip != self.adm_tip:
+            self.adm_tip = tip
 
     @staticmethod
     def key_of(data):
@@ -485,6 +701,8 @@ class Device(GObject.Object):
         self.last_seen = _parse_time(data.get("last_seen"))
         uptime = data.get("uptime_seconds")
         self.uptime = int(uptime) if self.answered and isinstance(uptime, (int, float)) else None
+        rtt = data.get("rtt_ms")
+        self.rtt = f"{rtt:g} ms" if self.answered and isinstance(rtt, (int, float)) else ""
         self.ids = " · ".join(p for p in (self.mac, self.serial) if p)
         self._set_online(self.answered or self.in_grace())
 
@@ -512,8 +730,11 @@ class Device(GObject.Object):
                  f"ADM {self.adm}" if self.adm else "",
                  f"port {self.port}" if self.port else ""]
         self.details = " · ".join(p for p in parts if p)
-        self.text = " ".join((self.name, self.ip, self.model, self.serial, self.mac,
-                              self.adm, self.port, self.state)).lower()
+        # The latency is shown on request only (Ping, Details), not here.
+        if self.ip != self.ip_tip:
+            self.ip_tip = self.ip
+        self.text = " ".join((self.name, self.ip, self.model, self.serial, self.mac, self.adm,
+                              self.port, self.state, self.tags.replace(",", " "), self.note)).lower()
         self._tip()
 
     def matches(self, query):
@@ -612,6 +833,9 @@ class AccWindow(Gtk.ApplicationWindow):
         self._state_px = None  # width of the widest State text
         self._status_timer = None
         self._rows = {}  # view -> {list item: (device, row widget)}
+        self._auto = False  # the running scan was started by the timer
+        self.adm_password = None  # for this session, when not in the keyring
+        self.prefs_win = None
 
         self._build_actions()
         self._build_header()
@@ -633,6 +857,14 @@ class AccWindow(Gtk.ApplicationWindow):
             ("wake", self.wake_selected),
             ("ping", self.ping_selected),
             ("ports", self.check_ports),
+            ("health", self.show_health),
+            ("ssh", self.open_ssh),
+            ("tags", self.edit_tags),
+            ("export", self.export_list),
+            ("restart", lambda: self.power("restart")),
+            ("shutdown", lambda: self.power("shutdown")),
+            ("adm-window", self.open_adm_window),
+            ("prefs", self.show_prefs),
             ("compat-hdd", self.open_compat),
             ("compat-ssd", self.open_compat),
             ("copy-ip", lambda: self._copy("ip")),
@@ -711,6 +943,7 @@ class AccWindow(Gtk.ApplicationWindow):
         section = Gio.Menu()
         section.append("Open ADM", "win.open")
         section.append("Open shared folders", "win.shares")
+        section.append("Details (SNMP)…", "win.health")
         section.append("Wake (WOL)", "win.wake")
         section.append("Ping", "win.ping")
         section.append("Check services (ports)…", "win.ports")
@@ -719,18 +952,14 @@ class AccWindow(Gtk.ApplicationWindow):
         section = Gio.Menu()
         section.append(f"Refresh every {REFRESH_SECONDS} s", "win.auto-refresh")
         section.append("Show offline devices", "win.show-offline")
-        accents = Gio.Menu()
-        for name in ACCENTS:
-            item = Gio.MenuItem.new(name, None)
-            item.set_action_and_target_value("win.accent", GLib.Variant("s", name))
-            accents.append_item(item)
-        section.append_submenu("Accent colour", accents)
         menu.append_section(None, section)
         section = Gio.Menu()
+        section.append("Export device list…", "win.export")
         section.append("Diagnose discovery…", "win.doctor")
         section.append("Forget offline devices", "win.forget-offline")
         menu.append_section(None, section)
         section = Gio.Menu()
+        section.append("Preferences…", "win.prefs")
         section.append(f"About {APP_NAME}", "win.about")
         menu.append_section(None, section)
         menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True)
@@ -819,15 +1048,23 @@ class AccWindow(Gtk.ApplicationWindow):
         model = Gio.Menu()
         section = Gio.Menu()
         section.append("Open ADM", "win.open")
+        section.append("Open ADM in a window", "win.adm-window")
         section.append("Open shared folders", "win.shares")
+        section.append("Details (SNMP)…", "win.health")
         section.append("Wake (WOL)", "win.wake")
         section.append("Ping", "win.ping")
         section.append("Check services (ports)…", "win.ports")
+        section.append("Open SSH in a terminal", "win.ssh")
         model.append_section(None, section)
         model.append_section(None, self._link_menu())
         section = Gio.Menu()
+        section.append("Tags and note…", "win.tags")
         section.append("Copy IP address", "win.copy-ip")
         section.append("Copy MAC address", "win.copy-mac")
+        model.append_section(None, section)
+        section = Gio.Menu()
+        section.append("Restart…", "win.restart")
+        section.append("Shut down…", "win.shutdown")
         model.append_section(None, section)
         section = Gio.Menu()
         section.append("Forget this device", "win.forget")
@@ -946,6 +1183,16 @@ class AccWindow(Gtk.ApplicationWindow):
                           else Pango.EllipsizeMode.END)
         if prop in TABULAR:
             label.add_css_class("tabular")
+        if prop == "name":
+            # The name, then its tags as small pills.
+            box = Gtk.Box(spacing=6)
+            label.set_hexpand(True)
+            box.append(label)
+            box.tags = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER)
+            box.append(box.tags)
+            box.label = label
+            item.set_child(box)
+            return
         if not whole or prop == "adm":
             item.set_child(label)
             return
@@ -976,10 +1223,9 @@ class AccWindow(Gtk.ApplicationWindow):
         label = getattr(widget, "label", widget)
         flags = GObject.BindingFlags.SYNC_CREATE
         item.bindings = [dev.bind_property(prop, label, "label", flags)]
-        if prop == "state":
-            item.bindings.append(dev.bind_property("state_tip", widget, "tooltip-text", flags))
-        else:
-            item.bindings.append(dev.bind_property(prop, label, "tooltip-text", flags))
+        tip = {"state": "state_tip", "ip": "ip_tip", "adm": "adm_tip", "name": "note"}.get(prop, prop)
+        target = widget if prop == "state" else label
+        item.bindings.append(dev.bind_property(tip, target, "tooltip-text", flags))
         item.handlers = [dev.connect("notify::online", lambda *_: self._style(widget, dev))]
         if prop == "model":
             widget.glyph.set_model(dev.model)
@@ -987,6 +1233,11 @@ class AccWindow(Gtk.ApplicationWindow):
                 "notify::model", lambda *_: widget.glyph.set_model(dev.model)))
         if prop == "state":
             item.handlers.append(dev.connect("notify::state", lambda *_: self._style(widget, dev)))
+        if prop == "adm":
+            item.handlers.append(dev.connect("notify::outdated", lambda *_: self._style(widget, dev)))
+        if prop == "name":
+            fill_tags(widget.tags, dev)
+            item.handlers.append(dev.connect("notify::tags", lambda *_: fill_tags(widget.tags, dev)))
         self._style(widget, dev)
         if prop == "name":
             self._rows[self.view][item] = (dev, widget)
@@ -1002,7 +1253,8 @@ class AccWindow(Gtk.ApplicationWindow):
         row.model = Gtk.Label(xalign=0)
         row.model.add_css_class("card-name")
         row.name = Gtk.Label(xalign=0, hexpand=True, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
-        for w in (row.glyph, row.dot, row.model, row.name):
+        row.tags = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER)
+        for w in (row.glyph, row.dot, row.model, row.name, row.tags):
             top.append(w)
         row.details = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
         row.ids = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
@@ -1024,7 +1276,9 @@ class AccWindow(Gtk.ApplicationWindow):
         ]
         item.handlers = [dev.connect("notify::online", lambda *_: self._style(row, dev)),
                          dev.connect("notify::state", lambda *_: self._style(row, dev)),
-                         dev.connect("notify::model", lambda *_: row.glyph.set_model(dev.model))]
+                         dev.connect("notify::model", lambda *_: row.glyph.set_model(dev.model)),
+                         dev.connect("notify::tags", lambda *_: fill_tags(row.tags, dev))]
+        fill_tags(row.tags, dev)
         self._style(row, dev)
         self._rows[self.cards][item] = (dev, row)
 
@@ -1046,6 +1300,12 @@ class AccWindow(Gtk.ApplicationWindow):
             target.remove_css_class("dim-label")
         else:
             target.add_css_class("dim-label")
+        if isinstance(widget, Gtk.Label) and widget.get_label() == dev.adm:
+            # the ADM cell: a dotted underline when a newer ADM runs elsewhere
+            if dev.outdated:
+                widget.add_css_class("outdated")
+            else:
+                widget.remove_css_class("outdated")
         glyph = getattr(widget, "glyph", None)
         if glyph is not None:
             glyph.set_opacity(1.0 if dev.online else 0.45)
@@ -1076,11 +1336,14 @@ class AccWindow(Gtk.ApplicationWindow):
         self.spinner.start()
         self._show_summary("Scanning the local network…")
 
+        args = [ACC_BIN, "scan", "--json", "--all", "--timeout", str(SCAN_TIMEOUT)]
+        for cidr in parse_subnets(self.settings.get("subnets", ""))[0]:
+            args += ["--subnet", cidr]
+
         def worker():
             try:
                 out = subprocess.run(
-                    [ACC_BIN, "scan", "--json", "--all", "--timeout", str(SCAN_TIMEOUT)],
-                    capture_output=True, text=True, check=True, timeout=SCAN_TIMEOUT * 5,
+                    args, capture_output=True, text=True, check=True, timeout=SCAN_TIMEOUT * 5,
                 ).stdout
                 devices, err = json.loads(out) or [], None
             except FileNotFoundError:
@@ -1104,12 +1367,16 @@ class AccWindow(Gtk.ApplicationWindow):
         else:
             self._apply(devices)
             self.last_scan = time.time()
+        self._auto = False
         self._refresh_summary()
         return GLib.SOURCE_REMOVE
 
     def _apply(self, devices):
         """Update the views in place so selection and scroll position stay."""
         fresh = {Device.key_of(d): d for d in devices}
+        meta = self.settings.get("devices", {})
+        first = self.last_scan is None
+        went_off, came_back, new = [], [], []
         i = 0
         while i < self.store.get_n_items():
             dev = self.store.get_item(i)
@@ -1117,20 +1384,64 @@ class AccWindow(Gtk.ApplicationWindow):
             if data is None:
                 self.store.remove(i)
             else:
+                was = dev.online
                 dev.update(data)
+                if was and not dev.online:
+                    went_off.append(dev.name)
+                elif dev.online and not was:
+                    came_back.append(dev.name)
                 i += 1
         # One splice instead of one append per device: every insert into
         # the sorted model shifts rows and makes the views rebind, which
         # with a few hundred devices takes seconds of main-loop time.
         if fresh:
-            self.store.splice(self.store.get_n_items(), 0, [Device(d) for d in fresh.values()])
+            added = [Device(d, meta.get(Device.key_of(d))) for d in fresh.values()]
+            new = [d.name for d in added if d.online]
+            self.store.splice(self.store.get_n_items(), 0, added)
+        self._mark_adm()
         self.filter.changed(Gtk.FilterChange.DIFFERENT)
         sorter = self.view.get_sorter()
         if sorter is not None:
             sorter.changed(Gtk.SorterChange.DIFFERENT)
+        if not first and (self._auto or not self.is_active()):
+            self._notify_presence(went_off, came_back, new)
+
+    def _mark_adm(self):
+        """Mark the ADM versions that are behind the newest one seen on
+        any NAS: a dotted underline, the details in the tooltip."""
+        devices = [d for d in self._devices() if d.adm]
+        if not devices:
+            return
+        newest = max(devices, key=lambda d: adm_version_key(d.adm))
+        newest_key = adm_version_key(newest.adm)
+        for d in devices:
+            behind = adm_version_key(d.adm) < newest_key
+            tip = f"ADM {d.adm}"
+            if behind:
+                tip += f" · {newest.name} runs the newer ADM {newest.adm}"
+            d.set_adm_state(behind, tip)
+
+    def _notify_presence(self, went_off, came_back, new):
+        """Desktop notifications for devices that changed presence."""
+        if not self.settings.get("notify", True):
+            return
+        app = self.get_application()
+        if app is None:
+            return
+        for ident, title, names in (("offline", "NAS offline", went_off),
+                                    ("online", "NAS back online", came_back),
+                                    ("new", "New NAS found", new)):
+            if not names:
+                continue
+            body = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+            note = Gio.Notification.new(title)
+            note.set_body(body)
+            note.set_icon(Gio.ThemedIcon.new(APP_ID))
+            app.send_notification(f"presence-{ident}", note)
 
     def _auto_scan(self):
         if self.auto_refresh and not self.scanning:
+            self._auto = True
             self.scan()
         return GLib.SOURCE_CONTINUE
 
@@ -1241,6 +1552,12 @@ class AccWindow(Gtk.ApplicationWindow):
         self.lookup_action("wake").set_enabled(dev is not None and bool(dev.mac))
         self.lookup_action("ping").set_enabled(dev is not None and bool(dev.ip))
         self.lookup_action("ports").set_enabled(dev is not None and bool(dev.ip))
+        self.lookup_action("ssh").set_enabled(dev is not None and bool(dev.ip))
+        self.lookup_action("health").set_enabled(dev is not None and dev.online and bool(dev.ip))
+        self.lookup_action("tags").set_enabled(dev is not None)
+        can_power = dev is not None and dev.online and dev.initialized and bool(dev.url)
+        for name in ("restart", "shutdown", "adm-window"):
+            self.lookup_action(name).set_enabled(can_power)
         has_model = dev is not None and bool(dev.model)
         media = model_links(dev.model)[1] if has_model else ""
         self.lookup_action("compat-hdd").set_enabled(has_model and media == "HDD")
@@ -1396,6 +1713,190 @@ class AccWindow(Gtk.ApplicationWindow):
             return
         PortsWindow(self, dev).present()
 
+    def show_health(self):
+        dev = self.selected()
+        if dev is None or not dev.ip:
+            return
+        HealthWindow(self, dev).present()
+
+    def open_adm_window(self):
+        dev = self.selected()
+        if dev is None or not dev.url:
+            return
+        if WebKit is None:
+            self.set_status(f"Opening ADM in the browser ({WEBKIT_HINT})…")
+            self._launch(dev.url)
+            return
+        WebWindow(self, dev.url, f"ADM · {dev.name}").present()
+
+    def open_ssh(self):
+        dev = self.selected()
+        if dev is None or not dev.ip:
+            return
+        term = terminal_command()
+        if term is None:
+            self.set_status("No terminal emulator found; set $TERMINAL to yours.", sticky=True)
+            return
+        user = self.settings.get("ssh_user") or "admin"
+        try:
+            subprocess.Popen([*term, "ssh", f"{user}@{dev.ip}"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            self.set_status(f"Could not start {term[0]}: {exc}", sticky=True)
+            return
+        self.set_status(f"ssh {user}@{dev.ip} in {term[0]} (SSH must be enabled in ADM › Services)")
+
+    def edit_tags(self):
+        dev = self.selected()
+        if dev is not None:
+            TagsDialog(self, dev, self._save_tags).present()
+
+    def _save_tags(self, dev, tags, note):
+        devices = self.settings.setdefault("devices", {})
+        if tags or note:
+            devices[dev.key] = {"tags": tags, "note": note}
+        else:
+            devices.pop(dev.key, None)
+        save_settings(self.settings)
+        dev.set_meta(tags, note)
+        self.filter.changed(Gtk.FilterChange.DIFFERENT)
+        self._refresh_summary()
+
+    def export_list(self):
+        """The list as shown (filter and order) to a CSV file."""
+        devices = [self.sorted.get_item(i) for i in range(self.sorted.get_n_items())]
+        if not devices:
+            self.set_status("Nothing to export.")
+            return
+        name = f"asustor-nas-{time.strftime('%Y-%m-%d')}.csv"
+
+        def write(path):
+            if not path:
+                return
+            try:
+                with open(path, "w", newline="", encoding="utf-8") as f:
+                    out = csv.writer(f)
+                    out.writerow(["name", "model", "ip", "serial", "mac", "adm", "port", "state",
+                                  "uptime", "tags", "note"])
+                    for d in devices:
+                        up = d.uptime_now()
+                        out.writerow([d.name, d.model, d.ip, d.serial, d.mac, d.adm, d.port, d.state,
+                                      format_uptime(up) if up is not None else "",
+                                      ", ".join(d.tag_list()), d.note])
+            except OSError as exc:
+                self.set_status(f"Could not write {path}: {exc}", sticky=True)
+                return
+            self.set_status(f"Exported {len(devices)} device(s) to {path}")
+
+        if hasattr(Gtk, "FileDialog"):
+            dialog = Gtk.FileDialog(title="Export device list", initial_name=name)
+
+            def done(d, res):
+                try:
+                    f = d.save_finish(res)
+                except GLib.Error:
+                    return
+                write(f.get_path() if f else None)
+            dialog.save(self, None, done)
+        else:
+            chooser = Gtk.FileChooserNative.new("Export device list", self,
+                                                Gtk.FileChooserAction.SAVE, "Export", "Cancel")
+            chooser.set_current_name(name)
+
+            def response(c, r):
+                if r == Gtk.ResponseType.ACCEPT:
+                    write(c.get_file().get_path())
+                c.destroy()
+            chooser.connect("response", response)
+            chooser.show()
+
+    def show_prefs(self):
+        if self.prefs_win is None:
+            self.prefs_win = PreferencesWindow(self)
+            self.prefs_win.connect("close-request", lambda *_: setattr(self, "prefs_win", None) or False)
+        self.prefs_win.present()
+
+    # -- restart and shut down through ADM ---------------------------------
+    def power(self, action):
+        dev = self.selected()
+        if dev is None or not dev.online or not dev.url:
+            return
+        verb = "Restart" if action == "restart" else "Shut down"
+        what = "restarts" if action == "restart" else "shuts down"
+        self._confirm(f"{verb} {dev.name}?",
+                      f"ADM at {dev.ip} signs you in with your ADM account and {what} the NAS. "
+                      "Anyone using it loses the connection.",
+                      verb, lambda: self._with_credentials(dev, lambda a, p: self._run_power(
+                          dev, action, verb, a, p)))
+
+    def _confirm(self, title, body, verb, then):
+        if hasattr(Gtk, "AlertDialog"):
+            dialog = Gtk.AlertDialog(message=title, detail=body, buttons=["Cancel", verb],
+                                     cancel_button=0, default_button=0, modal=True)
+
+            def chosen(d, res):
+                try:
+                    if d.choose_finish(res) == 1:
+                        then()
+                except GLib.Error:
+                    pass
+            dialog.choose(self, None, chosen)
+            return
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True, text=title, secondary_text=body)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button(verb, Gtk.ResponseType.OK)
+
+        def response(d, r):
+            d.destroy()
+            if r == Gtk.ResponseType.OK:
+                then()
+        dialog.connect("response", response)
+        dialog.present()
+
+    def _with_credentials(self, dev, then):
+        account = self.settings.get("adm_account") or "admin"
+        password = self.adm_password or keyring_lookup()
+        if password:
+            then(account, password)
+            return
+        CredentialsDialog(self, dev, account,
+                          lambda a, p, remember: self._got_credentials(a, p, remember, then)).present()
+
+    def _got_credentials(self, account, password, remember, then):
+        self.settings["adm_account"] = account
+        save_settings(self.settings)
+        self.adm_password = password
+        if remember and keyring_store(account, password):
+            self.set_status("The ADM password is in your keyring; Preferences forgets it.")
+        then(account, password)
+
+    def _run_power(self, dev, action, verb, account, password):
+        self.set_status(f"Signing in to ADM on {dev.name} as {account}…", sticky=True)
+
+        def worker():
+            login_failed = False
+            try:
+                try:
+                    sid = adm_login(dev.url, account, password)
+                except AdmError:
+                    login_failed = True
+                    raise
+                adm_power(dev.url, sid, action)
+                msg, ok = f"{dev.name} is {'restarting' if action == 'restart' else 'shutting down'}.", True
+            except AdmError as exc:
+                msg, ok = f"Could not {verb.lower()} {dev.name}: {exc}", False
+                if login_failed:
+                    msg += " The password is forgotten; the next try asks again."
+            GLib.idle_add(lambda: self._power_done(msg, ok, login_failed) and False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _power_done(self, msg, ok, login_failed):
+        if login_failed:
+            self.adm_password = None
+            keyring_clear()
+        self.set_status(msg, sticky=not ok)
+
     def ping_selected(self):
         dev = self.selected()
         if dev is None or not dev.ip:
@@ -1491,16 +1992,32 @@ class AccWindow(Gtk.ApplicationWindow):
         self._run_acc(["doctor"], lambda out, err: text.get_buffer().set_text(out + err))
 
     def show_about(self):
+        version = GUI_VERSION if GUI_VERSION != "dev" else (self.acc_version or "dev")
+        comments = ("Unofficial Linux version of the ASUSTOR Control Center: NAS discovery, "
+                    "ADM launcher, shared folders, Wake-on-LAN, services check and SNMP details.")
+        debug = "\n".join([
+            f"acc-gui {GUI_VERSION}",
+            f"acc {self.acc_version or '?'} at {ACC_PATH}",
+            f"GTK {Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}",
+            f"libadwaita {Adw.MAJOR_VERSION}.{Adw.MINOR_VERSION}" if Adw else "libadwaita: not installed",
+            f"WebKitGTK {WebKit.get_major_version()}.{WebKit.get_minor_version()}" if WebKit
+            else "WebKitGTK: not installed (the compatibility list opens in the browser)",
+            "libsecret: available" if Secret else "libsecret: not installed (the ADM password "
+                                                  "is kept for the session only)",
+        ])
+        if Adw is not None and hasattr(Adw, "AboutWindow"):
+            about = Adw.AboutWindow(
+                transient_for=self, modal=True, application_name=APP_FULL_NAME,
+                application_icon=APP_ID, developer_name="Frank Eckardt", version=version,
+                comments=comments, website=WEBSITE, issue_url=f"{WEBSITE}/issues",
+                license_type=Gtk.License.MIT_X11, debug_info=debug,
+                debug_info_filename="asustor-acc-debug.txt")
+            about.present()
+            return
         about = Gtk.AboutDialog(
-            transient_for=self, modal=True,
-            program_name=APP_FULL_NAME,
-            version=GUI_VERSION if GUI_VERSION != "dev" else (self.acc_version or "dev"),
-            comments="Unofficial Linux version of the ASUSTOR Control Center: "
-                     "NAS discovery, ADM launcher and Wake-on-LAN.\n\n"
-                     f"acc-gui {GUI_VERSION} · acc {self.acc_version or '?'} at {ACC_PATH}",
-            website=WEBSITE,
-            license_type=Gtk.License.MIT_X11,
-        )
+            transient_for=self, modal=True, program_name=APP_FULL_NAME, version=version,
+            comments=comments, website=WEBSITE, license_type=Gtk.License.MIT_X11,
+            system_information=debug, authors=["Frank Eckardt"])
         # Installed: the themed icon. Run from a source checkout: the PNG.
         if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(APP_ID):
             about.set_logo_icon_name(APP_ID)
@@ -1545,6 +2062,429 @@ class AccWindow(Gtk.ApplicationWindow):
             self._status_timer = GLib.timeout_add_seconds(8, self._set_hint)
 
 
+def format_gb(gb):
+    if gb is None:
+        return "?"
+    return f"{gb / 1000:.1f} TB" if gb >= 1000 else f"{gb:g} GB"
+
+
+def looks_fine(*words):
+    """True unless a status word hints at trouble."""
+    text = " ".join(w for w in words if w).lower()
+    return not any(bad in text for bad in ("fail", "error", "warn", "abnormal", "bad", "critical",
+                                            "degrad", "danger"))
+
+
+class ChildWindow(Gtk.Window):
+    """A window of the app placed over the main window: header bar with a
+    title and subtitle, accent stripe, a body and a status line."""
+
+    def __init__(self, parent, title, subtitle, width, height):
+        super().__init__(title=title, application=parent.get_application(),
+                         transient_for=parent, destroy_with_parent=True,
+                         default_width=width, default_height=height)
+        self.set_size_request(MIN_WIDTH, 300)
+        self.set_icon_name(APP_ID)
+        self.parent_window = parent
+        self.header = Gtk.HeaderBar()
+        self.set_titlebar(self.header)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        self.title_label = Gtk.Label(label=title, ellipsize=Pango.EllipsizeMode.END)
+        self.title_label.add_css_class("title")
+        self.subtitle_label = Gtk.Label(label=subtitle, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        self.subtitle_label.add_css_class("subtitle")
+        titles.append(self.title_label)
+        titles.append(self.subtitle_label)
+        self.header.set_title_widget(titles)
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                            margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        self.summary = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+        self.summary.add_css_class("dim-label")
+        self.summary.add_css_class("statusbar")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(accent_stripe())
+        box.append(Gtk.ScrolledWindow(child=self.body, vexpand=True,
+                                      hscrollbar_policy=Gtk.PolicyType.NEVER))
+        box.append(Gtk.Separator())
+        box.append(self.summary)
+        self.set_child(box)
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._key)
+        self.add_controller(keys)
+
+    def clear_body(self):
+        while (child := self.body.get_first_child()) is not None:
+            self.body.remove(child)
+
+    def _key(self, _controller, keyval, _keycode, _state):
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+        if keyval == Gdk.KEY_F5 and hasattr(self, "check"):
+            self.check()
+            return True
+        return False
+
+
+class HealthWindow(ChildWindow):
+    """What the NAS reports about itself over SNMP (`acc health`): system,
+    disks and volumes, refreshed every REFRESH seconds while open."""
+
+    REFRESH = 15
+
+    def __init__(self, parent, dev):
+        super().__init__(parent, f"{dev.name} · details", dev.ip, 560, 700)
+        self.dev = dev
+        self.checking = False
+        again = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh (F5)")
+        again.connect("clicked", lambda *_: self.check())
+        self.header.pack_start(again)
+        self.spinner = Gtk.Spinner()
+        self.header.pack_start(self.spinner)
+        self.timer = GLib.timeout_add_seconds(self.REFRESH, self._tick)
+        self.connect("close-request", self._closing)
+        self.check()
+
+    def _closing(self, *_):
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = None
+        return False
+
+    def _tick(self):
+        self.check()
+        return GLib.SOURCE_CONTINUE
+
+    def check(self):
+        if self.checking:
+            return
+        self.checking = True
+        self.spinner.start()
+        self.parent_window._run_acc(["health", self.dev.ip, "--json"], self._done)
+
+    def _done(self, out, err):
+        self.checking = False
+        self.spinner.stop()
+        try:
+            report = json.loads(out) if out else None
+        except ValueError:
+            report = None
+        self.clear_body()
+        if not isinstance(report, dict):
+            self._problem(f"No SNMP answer from {self.dev.ip}.",
+                          "Enable SNMP in ADM › Services › SNMP (v1/v2c, community “public”); "
+                          "the uptime, temperatures, fans, disks and volumes come from there.",
+                          err)
+            return
+        self._render(report)
+        self.summary.set_text(f"Read over SNMP at {time.strftime('%H:%M:%S')}; "
+                              f"refreshes every {self.REFRESH} s while open.")
+
+    def _problem(self, title, text, detail):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=24,
+                       halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        icon = Gtk.Image.new_from_icon_name("network-server-symbolic")
+        icon.set_pixel_size(64)
+        icon.add_css_class("accent-icon")
+        head = Gtk.Label(label=title, wrap=True, justify=Gtk.Justification.CENTER)
+        head.add_css_class("empty-title")
+        body = Gtk.Label(label=text, wrap=True, max_width_chars=48, justify=Gtk.Justification.CENTER)
+        body.add_css_class("dim-label")
+        button = Gtk.Button(label="Open ADM", halign=Gtk.Align.CENTER, margin_top=8)
+        button.add_css_class("accent")
+        button.connect("clicked", lambda *_: self.parent_window._launch(self.dev.url))
+        for w in (icon, head, body, button):
+            page.append(w)
+        self.body.append(page)
+        self.summary.set_text(detail.splitlines()[0] if detail else "")
+
+    def _section(self, title):
+        label = Gtk.Label(label=title, xalign=0)
+        label.add_css_class("section-title")
+        self.body.append(label)
+        group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        group.add_css_class("boxed-list" if Adw else "rich-list")
+        self.body.append(group)
+        return group
+
+    @staticmethod
+    def _row(group, title, value, subtitle=None, level=None, ok=None):
+        row = Gtk.Box(spacing=12, margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        head = Gtk.Label(label=title, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        text.append(head)
+        if subtitle:
+            sub = Gtk.Label(label=subtitle, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+            sub.add_css_class("dim-label")
+            sub.add_css_class("caption")
+            text.append(sub)
+        if level is not None:
+            bar = Gtk.LevelBar(min_value=0, max_value=1, value=max(0.0, min(1.0, level)),
+                               margin_top=4)
+            bar.add_offset_value("low", 0.8)
+            bar.add_offset_value("high", 0.95)
+            bar.add_offset_value("full", 1.0)
+            bar.add_css_class("accent")
+            text.append(bar)
+        row.append(text)
+        val = Gtk.Label(label=value, xalign=1, valign=Gtk.Align.START)
+        val.add_css_class("health-value")
+        row.append(val)
+        if ok is not None:
+            dot = Gtk.Box(valign=Gtk.Align.CENTER)
+            dot.add_css_class("state-dot")
+            dot.add_css_class("health-dot")
+            dot.add_css_class("ok" if ok else "notready")
+            row.append(dot)
+        group.append(row)
+
+    def _render(self, r):
+        system = self._section("System")
+        if r.get("model") or r.get("processor"):
+            self._row(system, r.get("model") or self.dev.model, "", r.get("processor"))
+        if r.get("adm_version") or r.get("serial_number"):
+            self._row(system, "ADM", r.get("adm_version") or "?", r.get("serial_number"))
+        if r.get("uptime_seconds") is not None:
+            self._row(system, "Uptime", format_uptime(r["uptime_seconds"]))
+        if self.dev.rtt:
+            self._row(system, "Latency", self.dev.rtt,
+                      "TCP round trip to the ADM port, measured by the last scan")
+        cpu = r.get("cpu_usage") or []
+        if cpu:
+            avg = sum(cpu) / len(cpu)
+            self._row(system, "CPU", f"{avg:.0f}%", " · ".join(f"{c}%" for c in cpu) if len(cpu) > 1
+                      else None, level=avg / 100)
+        total, free = r.get("total_mem_mb"), r.get("free_mem_mb")
+        if total:
+            used = total - (free or 0)
+            self._row(system, "Memory", f"{used / 1024:.1f} of {total / 1024:.1f} GB",
+                      level=used / total)
+        temps = [f"System {r['sys_temp_c']} °C" if r.get("sys_temp_c") is not None else "",
+                 f"CPU {r['cpu_temp_c']} °C" if r.get("cpu_temp_c") is not None else ""]
+        temps = [t for t in temps if t]
+        if temps:
+            self._row(system, "Temperature", " · ".join(temps))
+        fans = r.get("fan_rpm") or []
+        if fans:
+            self._row(system, "Fans", ", ".join(f"{f} rpm" for f in fans))
+        if not r.get("model") and not r.get("disks") and not r.get("volumes"):
+            self._row(system, "ASUSTOR MIB", "not available",
+                      "The NAS answers SNMP but without its own MIB; only the uptime is known.")
+        disks = r.get("disks") or []
+        if disks:
+            group = self._section("Disks")
+            for d in disks:
+                parts = [format_gb(d.get("size_gb")) if d.get("size_gb") else "",
+                         f"{d['temp_c']} °C" if d.get("temp_c") is not None else ""]
+                sub = " · ".join(p for p in (d.get("model"), d.get("interface")) if p)
+                status = " · ".join(p for p in (d.get("status"), d.get("smart")) if p)
+                self._row(group, d.get("name") or f"Disk {d.get('index')}",
+                          " · ".join(p for p in parts if p),
+                          " · ".join(p for p in (sub, status) if p),
+                          ok=looks_fine(d.get("status"), d.get("smart")))
+        volumes = r.get("volumes") or []
+        if volumes:
+            group = self._section("Volumes")
+            for v in volumes:
+                total, free = v.get("total_gb"), v.get("free_gb")
+                used = (total - free) if total is not None and free is not None else None
+                value = f"{format_gb(used)} of {format_gb(total)}" if used is not None else ""
+                sub = " · ".join(p for p in (v.get("level"), v.get("filesystem"), v.get("status")) if p)
+                self._row(group, v.get("name") or f"Volume {v.get('index')}", value, sub,
+                          level=(used / total) if used is not None and total else None,
+                          ok=looks_fine(v.get("status")))
+
+
+class PreferencesWindow(Gtk.Window):
+    """Accent, notifications, extra subnets, the SSH user and the ADM
+    account. Everything applies at once and is remembered."""
+
+    def __init__(self, parent):
+        super().__init__(title="Preferences", application=parent.get_application(),
+                         transient_for=parent, destroy_with_parent=True, default_width=560)
+        self.set_size_request(MIN_WIDTH, -1)
+        self.set_icon_name(APP_ID)
+        self.parent_window = parent
+        self.set_titlebar(Gtk.HeaderBar())
+        settings = parent.settings
+        rows = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, margin_top=12,
+                           margin_bottom=12, margin_start=12, margin_end=12)
+        rows.add_css_class("boxed-list" if Adw else "rich-list")
+
+        names = list(ACCENTS)
+        accent = Gtk.DropDown.new_from_strings(names)
+        accent.set_selected(names.index(settings["accent"]) if settings["accent"] in names else 0)
+        accent.connect("notify::selected", lambda d, _p: parent.activate_action(
+            "accent", GLib.Variant("s", names[d.get_selected()])))
+        self._row(rows, "Accent colour", "The stripe, the main button, the Ready dots and the "
+                  "LEDs of the model glyphs.", accent)
+
+        notify = Gtk.Switch(active=bool(settings.get("notify", True)), valign=Gtk.Align.CENTER)
+        notify.connect("notify::active", lambda s, _p: self._set("notify", s.get_active()))
+        self._row(rows, "Notify when a NAS goes offline or returns",
+                  "Desktop notifications for changes an automatic scan finds, or one made "
+                  "while the window is in the background.", notify)
+
+        self.subnets = Gtk.Entry(text=settings.get("subnets", ""), width_chars=22,
+                                 placeholder_text="10.1.2.0/24, 10.1.3.0/24")
+        self.subnets.connect("changed", self._subnets_changed)
+        self._row(rows, "Also scan these subnets", "Each host is asked directly (unicast mDNS), "
+                  "which reaches NAS behind a router. Up to a /22 each.", self.subnets)
+
+        ssh = Gtk.Entry(text=settings.get("ssh_user", "admin"), width_chars=12)
+        ssh.connect("changed", lambda e: self._set("ssh_user", e.get_text().strip() or "admin"))
+        self._row(rows, "SSH user", "For “Open SSH in a terminal”.", ssh)
+
+        account_box = Gtk.Box(spacing=6)
+        account = Gtk.Entry(text=settings.get("adm_account", "admin"), width_chars=12)
+        account.connect("changed", lambda e: self._set("adm_account", e.get_text().strip() or "admin"))
+        account_box.append(account)
+        self.forget = Gtk.Button(label="Forget password", valign=Gtk.Align.CENTER)
+        self.forget.set_sensitive(bool(parent.adm_password or keyring_lookup()))
+        self.forget.connect("clicked", self._forget_password)
+        account_box.append(self.forget)
+        where = ("kept in your keyring when you ask for it" if Secret
+                 else "kept for this session only (libsecret is not installed)")
+        self._row(rows, "ADM account", f"For Restart and Shut down. The password is asked for "
+                  f"the first time and {where}.", account_box)
+
+        self.set_child(Gtk.ScrolledWindow(child=rows, propagate_natural_height=True,
+                                          hscrollbar_policy=Gtk.PolicyType.NEVER))
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", lambda _c, k, *_: (k == Gdk.KEY_Escape and (self.close() or True)))
+        self.add_controller(keys)
+
+    @staticmethod
+    def _row(rows, title, subtitle, widget):
+        row = Gtk.Box(spacing=12, margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
+                       valign=Gtk.Align.CENTER)
+        text.append(Gtk.Label(label=title, xalign=0, wrap=True))
+        sub = Gtk.Label(label=subtitle, xalign=0, wrap=True)
+        sub.add_css_class("dim-label")
+        sub.add_css_class("caption")
+        text.append(sub)
+        row.append(text)
+        widget.set_valign(Gtk.Align.CENTER)
+        row.append(widget)
+        rows.append(row)
+
+    def _set(self, key, value):
+        self.parent_window.settings[key] = value
+        save_settings(self.parent_window.settings)
+
+    def _subnets_changed(self, entry):
+        good, bad = parse_subnets(entry.get_text())
+        if bad:
+            entry.add_css_class("error")
+            entry.set_tooltip_text("Not a usable IPv4 subnet: " + ", ".join(bad))
+        else:
+            entry.remove_css_class("error")
+            entry.set_tooltip_text(None)
+            self._set("subnets", ", ".join(good))
+
+    def _forget_password(self, *_):
+        self.parent_window.adm_password = None
+        keyring_clear()
+        self.forget.set_sensitive(False)
+        self.parent_window.set_status("The ADM password is forgotten; the next restart asks again.")
+
+
+class EntryDialog(Gtk.Window):
+    """A small modal dialog over the main window with labelled entries and
+    Cancel / action buttons; Enter confirms, Escape cancels."""
+
+    def __init__(self, parent, title, subtitle, verb):
+        super().__init__(title=title, application=parent.get_application(), transient_for=parent,
+                         modal=True, destroy_with_parent=True, default_width=460, resizable=False)
+        self.set_icon_name(APP_ID)
+        header = Gtk.HeaderBar(show_title_buttons=False)
+        self.set_titlebar(header)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        head = Gtk.Label(label=title, ellipsize=Pango.EllipsizeMode.END)
+        head.add_css_class("title")
+        titles.append(head)
+        if subtitle:
+            sub = Gtk.Label(label=subtitle, ellipsize=Pango.EllipsizeMode.END)
+            sub.add_css_class("subtitle")
+            titles.append(sub)
+        header.set_title_widget(titles)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        header.pack_start(cancel)
+        self.ok = Gtk.Button(label=verb)
+        self.ok.add_css_class("accent")
+        self.ok.connect("clicked", lambda *_: self._confirm())
+        header.pack_end(self.ok)
+        self.grid = Gtk.Grid(row_spacing=10, column_spacing=12, margin_top=18,
+                             margin_bottom=18, margin_start=18, margin_end=18)
+        self.set_child(self.grid)
+        self.entries = []
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", lambda _c, k, *_: (k == Gdk.KEY_Escape and (self.close() or True)))
+        self.add_controller(keys)
+
+    def add_entry(self, label, entry):
+        caption = Gtk.Label(label=label, xalign=1)
+        caption.add_css_class("dim-label")
+        entry.set_hexpand(True)
+        entry.connect("activate", lambda *_: self._confirm())
+        self.grid.attach(caption, 0, len(self.entries), 1, 1)
+        self.grid.attach(entry, 1, len(self.entries), 1, 1)
+        self.entries.append(entry)
+        return entry
+
+    def add_widget(self, widget):
+        self.grid.attach(widget, 1, len(self.entries), 1, 1)
+        self.entries.append(widget)
+
+    def present(self):
+        super().present()
+        if self.entries:
+            self.entries[0].grab_focus()
+
+    def _confirm(self):
+        raise NotImplementedError
+
+
+class TagsDialog(EntryDialog):
+    def __init__(self, parent, dev, save):
+        super().__init__(parent, "Tags and note", dev.name, "Save")
+        self.dev, self.save = dev, save
+        self.tags = self.add_entry("Tags", Gtk.Entry(text=", ".join(dev.tag_list()),
+                                                     placeholder_text="office, rack 2, backup"))
+        self.note = self.add_entry("Note", Gtk.Entry(text=dev.note,
+                                                     placeholder_text="anything worth remembering"))
+
+    def _confirm(self):
+        tags = [t.strip() for t in self.tags.get_text().split(",") if t.strip()]
+        self.save(self.dev, tags, self.note.get_text().strip())
+        self.close()
+
+
+class CredentialsDialog(EntryDialog):
+    def __init__(self, parent, dev, account, done):
+        super().__init__(parent, "Sign in to ADM", f"{dev.name} · {dev.ip}", "Sign in")
+        self.done = done
+        self.account = self.add_entry("Account", Gtk.Entry(text=account))
+        self.password = self.add_entry("Password", Gtk.PasswordEntry(show_peek_icon=True))
+        self.remember = Gtk.CheckButton(label="Remember the password in the keyring",
+                                        active=Secret is not None, visible=Secret is not None)
+        self.add_widget(self.remember)
+
+    def present(self):
+        super().present()
+        self.password.grab_focus()
+
+    def _confirm(self):
+        account, password = self.account.get_text().strip(), self.password.get_text()
+        if not account or not password:
+            return
+        remember = self.remember.get_active()
+        self.close()
+        self.done(account, password, remember)
+
+
 class PortsWindow(Gtk.Window):
     """Which services of a NAS answer: the result of `acc ports`, one row
     per well-known port with a dot (accent: open, grey: closed, amber:
@@ -1552,6 +2492,7 @@ class PortsWindow(Gtk.Window):
 
     def __init__(self, parent, dev):
         super().__init__(title=f"Services of {dev.name}", application=parent.get_application(),
+                         transient_for=parent, destroy_with_parent=True,
                          default_width=520, default_height=640)
         self.set_size_request(MIN_WIDTH, 300)
         self.set_icon_name(APP_ID)
@@ -1652,6 +2593,7 @@ class WebWindow(Gtk.Window):
 
     def __init__(self, parent, url, title):
         super().__init__(title=title, application=parent.get_application(),
+                         transient_for=parent, destroy_with_parent=True,
                          default_width=1000, default_height=720)
         self.set_size_request(MIN_WIDTH, 300)
         self.set_icon_name(APP_ID)
@@ -1768,6 +2710,11 @@ class AccApp(AppBase):
         self.set_accels_for_action("win.shares", ["<Control><Shift>o"])
         self.set_accels_for_action("win.ping", ["<Control>p"])
         self.set_accels_for_action("win.ports", ["<Control><Shift>p"])
+        self.set_accels_for_action("win.health", ["<Control>d"])
+        self.set_accels_for_action("win.ssh", ["<Control>t"])
+        self.set_accels_for_action("win.tags", ["F2"])
+        self.set_accels_for_action("win.export", ["<Control>e"])
+        self.set_accels_for_action("win.prefs", ["<Control>comma"])
 
     def do_activate(self):
         win = self.get_active_window() or AccWindow(self)
