@@ -2390,8 +2390,8 @@ class PreferencesWindow(Gtk.Window):
         names = list(ACCENTS)
         accent = Gtk.DropDown.new_from_strings(names)
         accent.set_selected(names.index(settings["accent"]) if settings["accent"] in names else 0)
-        accent.connect("notify::selected", lambda d, _p: parent.activate_action(
-            "accent", GLib.Variant("s", names[d.get_selected()])))
+        accent.connect("notify::selected", lambda d, _p: parent.lookup_action("accent").change_state(
+            GLib.Variant("s", names[d.get_selected()])))
         self._row(rows, "Accent colour", "Stripe, main button, Ready dots, glyph LEDs.", accent)
 
         notify = Gtk.Switch(active=bool(settings.get("notify", True)), valign=Gtk.Align.CENTER)
