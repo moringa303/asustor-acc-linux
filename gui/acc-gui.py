@@ -409,7 +409,9 @@ listview.cards > row { padding: 8px 12px; }
        font-size: 0.8em; }
 label.outdated { text-decoration-line: underline; }
 .health-value { font-variant-numeric: tabular-nums; }
-.section-title { font-weight: bold; margin-top: 12px; margin-bottom: 4px; }
+.health-dot.warn { background: #e5a50a; }
+.health-dot.bad { background: #e01b24; }
+.section-title { font-weight: bold; margin-top: 10px; margin-bottom: 2px; }
 /* Short fades instead of hard switches: hover and selection of a row,
    a device dimming when it goes offline, a dot changing colour. */
 columnview > listview > row, listview.cards > row, list > row {
@@ -2068,11 +2070,38 @@ def format_gb(gb):
     return f"{gb / 1000:.1f} TB" if gb >= 1000 else f"{gb:g} GB"
 
 
-def looks_fine(*words):
-    """True unless a status word hints at trouble."""
+def verdict(*words):
+    """'ok', 'warn' or 'bad' from the status words ADM reports: disks are
+    Healthy, Normal, Risky, Dangerous or Bad; volumes healthy, clean,
+    active, then the busy states (resyncing, recovering, ...), then
+    degraded, failed and inactive."""
     text = " ".join(w for w in words if w).lower()
-    return not any(bad in text for bad in ("fail", "error", "warn", "abnormal", "bad", "critical",
-                                            "degrad", "danger"))
+    if any(w in text for w in ("bad", "danger", "fail", "inactive", "degrad", "critical", "error")):
+        return "bad"
+    if any(w in text for w in ("risky", "warn", "resync", "recover", "reshap", "append", "migrat",
+                               "expand", "initing", "abnormal", "unknown")):
+        return "warn"
+    return "ok"
+
+
+def raid_name(level):
+    """'raid1' -> 'RAID 1', 'single' -> 'Single', 'jbod' -> 'JBOD'."""
+    low = (level or "").lower()
+    if low.startswith("raid"):
+        return "RAID " + low[4:]
+    if low == "jbod":
+        return "JBOD"
+    return level[:1].upper() + level[1:] if level else ""
+
+
+UPS_FLAGS = {"OL": "on line", "OB": "on battery", "LB": "low battery", "HB": "high battery",
+             "RB": "replace battery", "CHRG": "charging", "DISCHRG": "discharging", "BYPASS": "bypass",
+             "CAL": "calibrating", "OFF": "off", "OVER": "overloaded", "TRIM": "trimming",
+             "BOOST": "boosting", "FSD": "forced shutdown"}
+
+
+def ups_status_text(status):
+    return ", ".join(UPS_FLAGS.get(f.upper(), f) for f in (status or "").split())
 
 
 class ChildWindow(Gtk.Window):
@@ -2199,100 +2228,139 @@ class HealthWindow(ChildWindow):
         self.summary.set_text(detail.splitlines()[0] if detail else "")
 
     def _section(self, title):
+        """A titled card holding a two-column grid: keys on the left, all
+        of them the same width across the window, values on the right."""
         label = Gtk.Label(label=title, xalign=0)
         label.add_css_class("section-title")
         self.body.append(label)
-        group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        group.add_css_class("boxed-list" if Adw else "rich-list")
-        self.body.append(group)
-        return group
+        grid = Gtk.Grid(column_spacing=16, row_spacing=10, margin_top=12, margin_bottom=12,
+                        margin_start=14, margin_end=14)
+        card = Gtk.Frame(child=grid)
+        card.add_css_class("card")
+        self.body.append(card)
+        grid.rows = 0
+        return grid
 
-    @staticmethod
-    def _row(group, title, value, subtitle=None, level=None, ok=None):
-        row = Gtk.Box(spacing=12, margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
-        head = Gtk.Label(label=title, xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        text.append(head)
-        if subtitle:
-            sub = Gtk.Label(label=subtitle, xalign=0, ellipsize=Pango.EllipsizeMode.END)
-            sub.add_css_class("dim-label")
-            sub.add_css_class("caption")
-            text.append(sub)
+    def _row(self, grid, key, value, detail=None, level=None, state=None):
+        """One line of a card: the key, then the value with an optional
+        status dot before it, a level bar under it and a dim detail line."""
+        k = Gtk.Label(label=key, xalign=1, yalign=0, valign=Gtk.Align.START)
+        k.add_css_class("dim-label")
+        self.keys.add_widget(k)
+        grid.attach(k, 0, grid.rows, 1, 1)
+        cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True)
+        line = Gtk.Box(spacing=8)
+        if state is not None:
+            dot = Gtk.Box(valign=Gtk.Align.CENTER)
+            for cls in ("state-dot", "health-dot", state):
+                dot.add_css_class(cls)
+            line.append(dot)
+        v = Gtk.Label(label=value, xalign=0, hexpand=True, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+        v.add_css_class("health-value")
+        line.append(v)
+        cell.append(line)
         if level is not None:
-            bar = Gtk.LevelBar(min_value=0, max_value=1, value=max(0.0, min(1.0, level)),
-                               margin_top=4)
+            bar = Gtk.LevelBar(min_value=0, max_value=1, value=max(0.0, min(1.0, level)))
             bar.add_offset_value("low", 0.8)
             bar.add_offset_value("high", 0.95)
             bar.add_offset_value("full", 1.0)
             bar.add_css_class("accent")
-            text.append(bar)
-        row.append(text)
-        val = Gtk.Label(label=value, xalign=1, valign=Gtk.Align.START)
-        val.add_css_class("health-value")
-        row.append(val)
-        if ok is not None:
-            dot = Gtk.Box(valign=Gtk.Align.CENTER)
-            dot.add_css_class("state-dot")
-            dot.add_css_class("health-dot")
-            dot.add_css_class("ok" if ok else "notready")
-            row.append(dot)
-        group.append(row)
+            cell.append(bar)
+        if detail:
+            d = Gtk.Label(label=detail, xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+            d.add_css_class("dim-label")
+            d.add_css_class("caption")
+            cell.append(d)
+        grid.attach(cell, 1, grid.rows, 1, 1)
+        grid.rows += 1
 
     def _render(self, r):
+        self.keys = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
         system = self._section("System")
-        if r.get("model") or r.get("processor"):
-            self._row(system, r.get("model") or self.dev.model, "", r.get("processor"))
-        if r.get("adm_version") or r.get("serial_number"):
-            self._row(system, "ADM", r.get("adm_version") or "?", r.get("serial_number"))
+        self._row(system, "Model", r.get("model") or self.dev.model or "?", r.get("processor"))
+        update = r.get("adm_update_available")
+        self._row(system, "ADM", r.get("adm_version") or self.dev.adm or "?",
+                  "An update is available for download" if update
+                  else ("Up to date" if update is False else None),
+                  state="warn" if update else None)
+        if r.get("bios_version"):
+            self._row(system, "BIOS", r["bios_version"])
+        if r.get("serial_number"):
+            self._row(system, "Serial", r["serial_number"])
         if r.get("uptime_seconds") is not None:
             self._row(system, "Uptime", format_uptime(r["uptime_seconds"]))
+        elif r.get("uptime_text"):
+            self._row(system, "Uptime", r["uptime_text"])
         if self.dev.rtt:
-            self._row(system, "Latency", self.dev.rtt,
-                      "TCP round trip to the ADM port, measured by the last scan")
+            self._row(system, "Latency", self.dev.rtt, "TCP round trip to ADM, measured by the last scan")
         cpu = r.get("cpu_usage") or []
         if cpu:
             avg = sum(cpu) / len(cpu)
-            self._row(system, "CPU", f"{avg:.0f}%", " · ".join(f"{c}%" for c in cpu) if len(cpu) > 1
-                      else None, level=avg / 100)
+            self._row(system, "CPU", f"{avg:.0f}% busy",
+                      ("per core: " + " · ".join(f"{c}%" for c in cpu)) if len(cpu) > 1 else None,
+                      level=avg / 100)
         total, free = r.get("total_mem_mb"), r.get("free_mem_mb")
         if total:
             used = total - (free or 0)
-            self._row(system, "Memory", f"{used / 1024:.1f} of {total / 1024:.1f} GB",
-                      level=used / total)
-        temps = [f"System {r['sys_temp_c']} °C" if r.get("sys_temp_c") is not None else "",
-                 f"CPU {r['cpu_temp_c']} °C" if r.get("cpu_temp_c") is not None else ""]
-        temps = [t for t in temps if t]
+            self._row(system, "Memory", f"{used / 1024:.1f} of {total / 1024:.1f} GB used "
+                      f"({used * 100 // total}%)", level=used / total)
+        temps = []
+        if r.get("sys_temp_c") is not None:
+            temps.append(f"system {r['sys_temp_c']} °C")
+        if r.get("cpu_temp_c") is not None:
+            temps.append(f"CPU {r['cpu_temp_c']} °C")
         if temps:
             self._row(system, "Temperature", " · ".join(temps))
         fans = r.get("fan_rpm") or []
         if fans:
-            self._row(system, "Fans", ", ".join(f"{f} rpm" for f in fans))
+            self._row(system, "Fans", " · ".join(f"{f} rpm" for f in fans))
         if not r.get("model") and not r.get("disks") and not r.get("volumes"):
             self._row(system, "ASUSTOR MIB", "not available",
-                      "The NAS answers SNMP but without its own MIB; only the uptime is known.")
+                      "The NAS answers SNMP without its own MIB; only the uptime is known.")
         disks = r.get("disks") or []
         if disks:
-            group = self._section("Disks")
+            grid = self._section("Disks")
             for d in disks:
-                parts = [format_gb(d.get("size_gb")) if d.get("size_gb") else "",
+                parts = [d.get("model"), d.get("type"),
+                         format_gb(d["size_gb"]) if d.get("size_gb") else "",
                          f"{d['temp_c']} °C" if d.get("temp_c") is not None else ""]
-                sub = " · ".join(p for p in (d.get("model"), d.get("interface")) if p)
-                status = " · ".join(p for p in (d.get("status"), d.get("smart")) if p)
-                self._row(group, d.get("name") or f"Disk {d.get('index')}",
-                          " · ".join(p for p in parts if p),
-                          " · ".join(p for p in (sub, status) if p),
-                          ok=looks_fine(d.get("status"), d.get("smart")))
+                detail = [d.get("status") or "", f"SMART {d['smart']}" if d.get("smart") else ""]
+                self._row(grid, d.get("name") or f"Disk {d.get('index')}",
+                          " · ".join(p for p in parts if p) or "no details",
+                          " · ".join(p for p in detail if p) or None,
+                          state=verdict(d.get("status"), d.get("smart")))
         volumes = r.get("volumes") or []
         if volumes:
-            group = self._section("Volumes")
+            grid = self._section("Volumes")
             for v in volumes:
                 total, free = v.get("total_gb"), v.get("free_gb")
                 used = (total - free) if total is not None and free is not None else None
-                value = f"{format_gb(used)} of {format_gb(total)}" if used is not None else ""
-                sub = " · ".join(p for p in (v.get("level"), v.get("filesystem"), v.get("status")) if p)
-                self._row(group, v.get("name") or f"Volume {v.get('index')}", value, sub,
+                value = (f"{format_gb(used)} of {format_gb(total)} used ({used * 100 // total}%)"
+                         if used is not None and total else "size unknown")
+                detail = [raid_name(v.get("level")), v.get("filesystem") or "", v.get("status") or ""]
+                self._row(grid, v.get("name") or f"Volume {v.get('index')}", value,
+                          " · ".join(p for p in detail if p) or None,
                           level=(used / total) if used is not None and total else None,
-                          ok=looks_fine(v.get("status")))
+                          state=verdict(v.get("status")))
+        ups = r.get("ups")
+        if isinstance(ups, dict) and (ups.get("model") or ups.get("status")):
+            grid = self._section("UPS")
+            model = " ".join(p for p in (ups.get("manufacturer"), ups.get("model")) if p)
+            if model:
+                self._row(grid, "Model", model)
+            status = ups.get("status") or ""
+            if status:
+                flags = status.upper().split()
+                self._row(grid, "Status", ups_status_text(status),
+                          state="bad" if "LB" in flags or "RB" in flags
+                          else ("warn" if "OB" in flags else "ok"))
+            charge = ups.get("charge_percent")
+            if charge is not None:
+                left = ups.get("runtime_seconds")
+                self._row(grid, "Battery", f"{charge}%"
+                          + (f" · {format_uptime(left)} left" if left else ""), level=charge / 100)
+            if ups.get("input_voltage") is not None:
+                self._row(grid, "Input", f"{ups['input_voltage']} V")
 
 
 class PreferencesWindow(Gtk.Window):
@@ -2316,37 +2384,34 @@ class PreferencesWindow(Gtk.Window):
         accent.set_selected(names.index(settings["accent"]) if settings["accent"] in names else 0)
         accent.connect("notify::selected", lambda d, _p: parent.activate_action(
             "accent", GLib.Variant("s", names[d.get_selected()])))
-        self._row(rows, "Accent colour", "The stripe, the main button, the Ready dots and the "
-                  "LEDs of the model glyphs.", accent)
+        self._row(rows, "Accent colour", "Stripe, main button, Ready dots, glyph LEDs.", accent)
 
         notify = Gtk.Switch(active=bool(settings.get("notify", True)), valign=Gtk.Align.CENTER)
         notify.connect("notify::active", lambda s, _p: self._set("notify", s.get_active()))
         self._row(rows, "Notify when a NAS goes offline or returns",
-                  "Desktop notifications for changes an automatic scan finds, or one made "
-                  "while the window is in the background.", notify)
+                  "For automatic scans, or while the window is in the background.", notify)
 
-        self.subnets = Gtk.Entry(text=settings.get("subnets", ""), width_chars=22,
+        self.subnets = Gtk.Entry(text=settings.get("subnets", ""), width_chars=18,
                                  placeholder_text="10.1.2.0/24, 10.1.3.0/24")
         self.subnets.connect("changed", self._subnets_changed)
-        self._row(rows, "Also scan these subnets", "Each host is asked directly (unicast mDNS), "
-                  "which reaches NAS behind a router. Up to a /22 each.", self.subnets)
+        self._row(rows, "Also scan these subnets",
+                  "Unicast queries to every host; reaches NAS behind a router. Up to a /22.",
+                  self.subnets)
 
-        ssh = Gtk.Entry(text=settings.get("ssh_user", "admin"), width_chars=12)
+        ssh = Gtk.Entry(text=settings.get("ssh_user", "admin"), width_chars=18)
         ssh.connect("changed", lambda e: self._set("ssh_user", e.get_text().strip() or "admin"))
         self._row(rows, "SSH user", "For “Open SSH in a terminal”.", ssh)
 
-        account_box = Gtk.Box(spacing=6)
-        account = Gtk.Entry(text=settings.get("adm_account", "admin"), width_chars=12)
+        account = Gtk.Entry(text=settings.get("adm_account", "admin"), width_chars=18)
         account.connect("changed", lambda e: self._set("adm_account", e.get_text().strip() or "admin"))
-        account_box.append(account)
-        self.forget = Gtk.Button(label="Forget password", valign=Gtk.Align.CENTER)
+        self._row(rows, "ADM account", "For Restart and Shut down.", account)
+
+        self.forget = Gtk.Button(label="Forget", valign=Gtk.Align.CENTER)
         self.forget.set_sensitive(bool(parent.adm_password or keyring_lookup()))
         self.forget.connect("clicked", self._forget_password)
-        account_box.append(self.forget)
-        where = ("kept in your keyring when you ask for it" if Secret
-                 else "kept for this session only (libsecret is not installed)")
-        self._row(rows, "ADM account", f"For Restart and Shut down. The password is asked for "
-                  f"the first time and {where}.", account_box)
+        where = ("Asked for once, then kept in your keyring if you tick it." if Secret
+                 else "Asked for once per session; libsecret is not installed, so never stored.")
+        self._row(rows, "ADM password", where, self.forget)
 
         self.set_child(Gtk.ScrolledWindow(child=rows, propagate_natural_height=True,
                                           hscrollbar_policy=Gtk.PolicyType.NEVER))

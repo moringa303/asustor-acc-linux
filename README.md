@@ -84,14 +84,18 @@ All versions: [releases page](https://github.com/moringa303/asustor-acc-linux/re
   the NAS or a mirror port on the switch.
 
 - Details over SNMP: "Details (SNMP)…" (Ctrl+D) and `acc health <name>`
-  show what the NAS reports about itself: model, ADM and serial, uptime,
-  CPU load, memory, system and CPU temperature, fan speed, every disk
-  with its model, size, temperature, status and SMART verdict, and
-  every volume with its RAID level, file system and usage. The window
-  refreshes every 15 seconds while open. It needs SNMP enabled in ADM
-  (Services › SNMP, v1/v2c), like the uptime. The latency to the NAS is
-  not shown in the list; the Ping button and the Details window give it
-  on request.
+  show what the NAS reports about itself through the ASUSTOR MIB:
+  model, processor, ADM version and whether an update is available,
+  BIOS, serial, uptime, CPU load, memory, system and CPU temperature,
+  fan speed, every disk with its model, type, size, temperature, status
+  and SMART verdict, every volume with its RAID level, file system,
+  usage and state, and the UPS (status, charge, runtime, input voltage)
+  when one is attached. Both layouts of the MIB that ADM has shipped
+  are understood (the older one with scalars, the ADM 4 one with
+  tables). The window refreshes every 15 seconds while open. It needs
+  SNMP enabled in ADM (Services › SNMP, v1/v2c), like the uptime. The
+  latency to the NAS is not shown in the list; the Ping button and the
+  Details window give it on request.
 
 - Restart and shut down: in the right-click menu, after a confirmation.
   The app signs in to ADM's web API with your ADM account (asked for
