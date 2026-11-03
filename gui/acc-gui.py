@@ -152,7 +152,12 @@ ADM_TIMEOUT = 15
 
 
 class AdmError(Exception):
-    pass
+    """rejected is True when ADM answered and said no (a wrong password,
+    say), False when ADM could not be reached or made no sense."""
+
+    def __init__(self, message, rejected=False):
+        super().__init__(message)
+        self.rejected = rejected
 
 
 def adm_endpoints():
@@ -195,7 +200,7 @@ def adm_call(base_url, path, form=None, sid=None):
         raise AdmError("unexpected answer from ADM")
     if answer.get("success") is False:
         msg = answer.get("error_msg") or f"error {answer.get('error_code', '?')}"
-        raise AdmError(f"ADM: {msg}")
+        raise AdmError(f"ADM: {msg}", rejected=True)
     return answer
 
 
@@ -257,9 +262,12 @@ TERMINALS = [
 def terminal_command():
     """The terminal emulator to run a command in: $TERMINAL, or the first
     known one that is installed. None when there is none."""
+    flags = dict(TERMINALS)
     term = os.environ.get("TERMINAL")
     if term and shutil.which(term):
-        return [term, "-e"]
+        # kitty and foot take the command as plain arguments, the others
+        # want -e or --; an unknown terminal is assumed to take -e.
+        return [term, *flags.get(os.path.basename(term), ["-e"])]
     for name, flag in TERMINALS:
         if shutil.which(name):
             return [name, *flag]
@@ -1187,6 +1195,7 @@ class AccWindow(Gtk.ApplicationWindow):
         whole = prop in WHOLE
         label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.NONE if whole
                           else Pango.EllipsizeMode.END)
+        label.prop = prop  # which column this cell shows, for _style
         if prop in TABULAR:
             label.add_css_class("tabular")
         if prop == "name":
@@ -1306,8 +1315,8 @@ class AccWindow(Gtk.ApplicationWindow):
             target.remove_css_class("dim-label")
         else:
             target.add_css_class("dim-label")
-        if isinstance(widget, Gtk.Label) and widget.get_label() == dev.adm:
-            # the ADM cell: a dotted underline when a newer ADM runs elsewhere
+        if getattr(widget, "prop", None) == "adm":
+            # the ADM cell: an underline when a newer ADM runs elsewhere
             if dev.outdated:
                 widget.add_css_class("outdated")
             else:
@@ -1884,8 +1893,10 @@ class AccWindow(Gtk.ApplicationWindow):
             try:
                 try:
                     sid = adm_login(dev.url, account, password)
-                except AdmError:
-                    login_failed = True
+                except AdmError as exc:
+                    # Only a sign-in ADM itself refused drops the stored
+                    # password; an unreachable NAS keeps it.
+                    login_failed = exc.rejected
                     raise
                 adm_power(dev.url, sid, action)
                 msg, ok = f"{dev.name} is {'restarting' if action == 'restart' else 'shutting down'}.", True
@@ -2014,7 +2025,7 @@ class AccWindow(Gtk.ApplicationWindow):
         if Adw is not None and hasattr(Adw, "AboutWindow"):
             about = Adw.AboutWindow(
                 transient_for=self, modal=True, application_name=APP_FULL_NAME,
-                application_icon=APP_ID, developer_name="Frank Eckardt", version=version,
+                application_icon=APP_ID, version=version,
                 comments=comments, website=WEBSITE, issue_url=f"{WEBSITE}/issues",
                 license_type=Gtk.License.MIT_X11, debug_info=debug,
                 debug_info_filename="asustor-acc-debug.txt")
@@ -2023,7 +2034,7 @@ class AccWindow(Gtk.ApplicationWindow):
         about = Gtk.AboutDialog(
             transient_for=self, modal=True, program_name=APP_FULL_NAME, version=version,
             comments=comments, website=WEBSITE, license_type=Gtk.License.MIT_X11,
-            system_information=debug, authors=["Frank Eckardt"])
+            system_information=debug)
         # Installed: the themed icon. Run from a source checkout: the PNG.
         if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(APP_ID):
             about.set_logo_icon_name(APP_ID)
